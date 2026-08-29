@@ -1,14 +1,19 @@
 /*
- * MacTube — 注入到每一个页面的脚本。
+ * WeTube 全局支持：内容下移 + 键盘快捷键。
  *
- * 由 wry 的 `with_initialization_script` 在文档创建时注入（相当于 document-start），
- * 因此这里不能假设 body 已经存在。
+ * 工具栏和窗口 chrome 都在 titlebar.js 里渲染，这里不重复创建。
+ * 但是仍有以下职责：
+ *   - 给 YouTube 页面追加顶部空白，让 masthead / ytd-app 不被 chrome 遮挡
+ *   - 接管 webview 内能拦到的浏览器级快捷键（刷新 / 后退 / 前进 / 首页），
+ *     转发给 IPC
+ *   - 提供切换自定义 chrome 整体显隐的接口 `window.__wetubeToggleChrome`
  */
 (() => {
-  if (window.__wetubeInjected) return;
-  window.__wetubeInjected = true;
+  if (window.__wetubeSupportMounted) return;
+  window.__wetubeSupportMounted = true;
 
-  const BAR_HEIGHT = 40;
+  /* 与 src/titlebar.js 里的 BAR_HEIGHT 同步；改一处记得改另一处。 */
+  const BAR_HEIGHT = 36;
 
   const send = (cmd) => {
     try {
@@ -18,182 +23,51 @@
     }
   };
 
-  const ICONS = {
-    back:
-      '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">' +
-      '<path d="M15 5 L8 12 L15 19" fill="none" stroke="currentColor" stroke-width="2"' +
-      ' stroke-linecap="round" stroke-linejoin="round"/></svg>',
-    forward:
-      '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">' +
-      '<path d="M9 5 L16 12 L9 19" fill="none" stroke="currentColor" stroke-width="2"' +
-      ' stroke-linecap="round" stroke-linejoin="round"/></svg>',
-    reload:
-      '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">' +
-      '<path d="M20.5 12a8.5 8.5 0 1 1-2.49-6.01" fill="none" stroke="currentColor"' +
-      ' stroke-width="2" stroke-linecap="round"/>' +
-      '<path d="M20.5 3.5v5h-5" fill="none" stroke="currentColor" stroke-width="2"' +
-      ' stroke-linecap="round" stroke-linejoin="round"/></svg>',
-    home:
-      '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">' +
-      '<path d="M4 11.2 12 4.5l8 6.7V20a1 1 0 0 1-1 1h-4.5v-6h-5v6H5a1 1 0 0 1-1-1z"' +
-      ' fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>',
-    external:
-      '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">' +
-      '<path d="M14 4h6v6" fill="none" stroke="currentColor" stroke-width="2"' +
-      ' stroke-linecap="round" stroke-linejoin="round"/>' +
-      '<path d="M20 4 11 13" fill="none" stroke="currentColor" stroke-width="2"' +
-      ' stroke-linecap="round"/>' +
-      '<path d="M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"' +
-      ' fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>',
-    settings:
-      '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">' +
-      '<circle cx="12" cy="12" r="3.2" fill="none" stroke="currentColor" stroke-width="2"/>' +
-      '<path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.2 5.2l2.1 2.1M16.7 16.7l2.1 2.1' +
-      'M18.8 5.2l-2.1 2.1M7.3 16.7l-2.1 2.1" fill="none" stroke="currentColor"' +
-      ' stroke-width="2" stroke-linecap="round"/></svg>',
-  };
-
-  const STYLE = `
-#wetube-bar {
-  position: fixed;
-  top: 0; left: 0; right: 0;
-  height: ${BAR_HEIGHT}px;
-  z-index: 2147483646;
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  padding: 0 8px;
-  box-sizing: border-box;
-  font: 13px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
-  color: #0f0f0f;
-  background: rgba(255, 255, 255, 0.86);
-  border-bottom: 1px solid rgba(0, 0, 0, 0.12);
-  backdrop-filter: saturate(180%) blur(14px);
-  -webkit-backdrop-filter: saturate(180%) blur(14px);
-  user-select: none;
-  -webkit-user-select: none;
-}
-#wetube-bar button {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 30px;
-  height: 30px;
-  padding: 0;
-  border: 0;
-  border-radius: 6px;
-  color: inherit;
-  background: transparent;
-  cursor: pointer;
-  transition: background-color 120ms ease;
-}
-#wetube-bar button:hover { background: rgba(0, 0, 0, 0.08); }
-#wetube-bar button:active { background: rgba(0, 0, 0, 0.14); }
-#wetube-bar button:disabled { opacity: 0.35; cursor: default; background: transparent; }
-#wetube-brand {
-  margin: 0 8px;
-  font-weight: 600;
-  letter-spacing: 0.2px;
-  cursor: pointer;
-  opacity: 0.85;
-}
-#wetube-spacer { flex: 1 1 auto; }
-#wetube-bar .mt-sep {
-  width: 1px;
-  height: 18px;
-  margin: 0 4px;
-  background: rgba(128, 128, 128, 0.35);
-}
-@media (prefers-color-scheme: dark) {
-  #wetube-bar {
-    color: #f1f1f1;
-    background: rgba(24, 24, 24, 0.86);
-    border-bottom: 1px solid rgba(255, 255, 255, 0.12);
-  }
-  #wetube-bar button:hover { background: rgba(255, 255, 255, 0.12); }
-  #wetube-bar button:active { background: rgba(255, 255, 255, 0.2); }
-}
-html.wetube-shift ytd-app { margin-top: ${BAR_HEIGHT}px !important; }
-html.wetube-shift #masthead-container,
-html.wetube-shift ytd-masthead { top: ${BAR_HEIGHT}px !important; }
-html.wetube-shift #page-manager { margin-top: ${BAR_HEIGHT}px !important; }
+  const SUPPORT_STYLE = `
+#wetube-support-shift ytd-app,
+#wetube-support-shift ytd-masthead,
+#wetube-support-shift #page-manager,
+#wetube-support-shift #masthead-container,
+#wetube-support-shift #header,
+#wetube-support-shift #container.ytd-searchbox,
+#wetube-support-shift div#top { margin-top: ${BAR_HEIGHT}px !important; }
 `;
 
   const isYouTube = () =>
     /(^|\.)youtube\.com$/.test(location.hostname) ||
     /(^|\.)youtube-nocookie\.com$/.test(location.hostname);
 
-  const applyShift = (on) => {
-    document.documentElement.classList.toggle("wetube-shift", on);
-  };
-
-  function mount() {
-    if (document.getElementById("wetube-bar")) return;
-
+  function mountStyle() {
+    if (document.getElementById("wetube-support-style")) return;
     const style = document.createElement("style");
-    style.id = "wetube-style";
-    style.textContent = STYLE;
+    style.id = "wetube-support-style";
+    style.textContent = SUPPORT_STYLE;
     (document.head || document.documentElement).appendChild(style);
-
-    const bar = document.createElement("div");
-    bar.id = "wetube-bar";
-    bar.innerHTML = [
-      `<button data-cmd="back" title="后退" aria-label="后退">${ICONS.back}</button>`,
-      `<button data-cmd="forward" title="前进" aria-label="前进">${ICONS.forward}</button>`,
-      `<button data-cmd="reload" title="刷新" aria-label="刷新">${ICONS.reload}</button>`,
-      `<button data-cmd="home" title="回到首页" aria-label="回到首页">${ICONS.home}</button>`,
-      `<div class="mt-sep"></div>`,
-      `<span id="wetube-brand" title="回到 youtube.com">WeTube</span>`,
-      `<div id="wetube-spacer"></div>`,
-      `<button data-cmd="open-external" title="在系统浏览器中打开" aria-label="在系统浏览器中打开">${ICONS.external}</button>`,
-      `<button data-cmd="settings" title="增强设置" aria-label="增强设置">${ICONS.settings}</button>`,
-    ].join("");
-
-    bar.addEventListener("click", (ev) => {
-      const btn = ev.target.closest && ev.target.closest("button[data-cmd]");
-      if (btn) {
-        const cmd = btn.getAttribute("data-cmd");
-        // 设置面板就在页面里，不用绕回 Rust
-        if (cmd === "settings") {
-          if (window.__YTE && window.__YTE.togglePanel) window.__YTE.togglePanel();
-          return;
-        }
-        send(cmd);
-        return;
-      }
-      if (ev.target && ev.target.id === "wetube-brand") send("home");
-    });
-
-    (document.body || document.documentElement).appendChild(bar);
     applyShift(isYouTube());
-
-    // 后退/前进按钮的可用状态：SPA 里 history.length 不精确，只在明显可判断时禁用。
-    const back = bar.querySelector('[data-cmd="back"]');
-    if (back && history.length <= 1) back.disabled = true;
   }
 
-  // 供菜单调用：显隐工具栏
-  window.__wetubeToggleBar = () => {
-    const bar = document.getElementById("wetube-bar");
-    if (!bar) return false;
-    const hidden = bar.style.display === "none";
-    bar.style.display = hidden ? "" : "none";
-    applyShift(!hidden && isYouTube());
-    return hidden;
+  function applyShift(on) {
+    const root = document.documentElement;
+    if (!root) return;
+    root.classList.toggle("wetube-support-shift", on);
+  }
+
+  // 监听路由变化，让 SPA 跳转后能保持正确的下移状态。
+  window.addEventListener("yt-navigate-finish", () => applyShift(isYouTube()));
+  window.addEventListener("popstate", () => applyShift(isYouTube()));
+  const _push = history.pushState;
+  history.pushState = function () {
+    const r = _push.apply(this, arguments);
+    setTimeout(() => applyShift(isYouTube()), 0);
+    return r;
   };
 
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", mount, { once: true });
-  } else {
-    mount();
-  }
-
-  // 键盘快捷键：webview 会先吃掉绝大多数按键，窗口级快捷键只能在页面内拦。
+  /* 键盘快捷键：webview 会先吃掉绝大多数按键，窗口级快捷键只能在页面内拦。 */
   window.addEventListener(
     "keydown",
     (ev) => {
       const mod = ev.metaKey || ev.ctrlKey;
-      if (!mod && ev.key !== "F5") return;
+      if (!mod && ev.key !== "F5" && ev.key !== "F11") return;
 
       if (mod && !ev.shiftKey && !ev.altKey && (ev.key === "r" || ev.key === "R")) {
         ev.preventDefault();
@@ -202,15 +76,15 @@ html.wetube-shift #page-manager { margin-top: ${BAR_HEIGHT}px !important; }
       }
       if (ev.key === "F5") {
         ev.preventDefault();
-        send(ev.shiftKey ? "reload" : "reload");
+        send("reload");
         return;
       }
-      if ((mod || ev.altKey) && ev.key === "ArrowLeft") {
+      if (mod && ev.key === "ArrowLeft" || ev.altKey && ev.key === "ArrowLeft") {
         ev.preventDefault();
         send("back");
         return;
       }
-      if ((mod || ev.altKey) && ev.key === "ArrowRight") {
+      if (mod && ev.key === "ArrowRight" || ev.altKey && ev.key === "ArrowRight") {
         ev.preventDefault();
         send("forward");
         return;
@@ -220,11 +94,48 @@ html.wetube-shift #page-manager { margin-top: ${BAR_HEIGHT}px !important; }
         send("home");
         return;
       }
-      if (mod && ev.shiftKey && (ev.key === "b" || ev.key === "B")) {
+      if (mod && ev.shiftKey && (ev.key === "o" || ev.key === "O")) {
         ev.preventDefault();
-        send("toggle-toolbar");
+        send("open-external");
+        return;
+      }
+      if (ev.key === "F11") {
+        ev.preventDefault();
+        send("fullscreen");
+        return;
+      }
+      if (mod && ev.key === ",") {
+        ev.preventDefault();
+        send("settings");
+        return;
       }
     },
     true
   );
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", mountStyle, { once: true });
+  } else {
+    mountStyle();
+  }
+  /* DOMContentLoaded 在 document-start 注入时还没到，体例先监听一次。 */
+  document.addEventListener("DOMContentLoaded", () => applyShift(isYouTube()), {
+    once: true,
+  });
+  applyShift(isYouTube());
+
+  // 显隐整个自定义 chrome（菜单按钮 + 工具栏 + 窗口控制）
+  window.__wetubeToggleChrome = () => {
+    const bar = document.getElementById("wetube-chrome");
+    if (!bar) return false;
+    const hidden = bar.style.display === "none";
+    bar.style.display = hidden ? "" : "none";
+    // 重设下移偏移
+    document.documentElement.style.setProperty(
+      "--wetube-bar-height",
+      hidden ? BAR_HEIGHT + "px" : "0px"
+    );
+    applyShift(hidden && isYouTube());
+    return hidden;
+  };
 })();

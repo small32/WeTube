@@ -19,6 +19,8 @@ thiserror = "2.0.20"
 wry = "0.56.1"
 
 [build-dependencies]
+# 解码 PNG 图标为 RGBA，给 tao::Icon 用。
+image = { version = "0.25", default-features = false, features = ["png"] }
 serde_json = "1.0.151"
 # 只在 Windows 上用到：给 exe 嵌入图标和版本信息，需要 Windows SDK 的 rc.exe。
 winresource = "0.1.31"

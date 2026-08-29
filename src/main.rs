@@ -5,7 +5,7 @@
 //!
 //!   * 窗口：tao（Tauri 的窗口库，winit 的分支）
 //!   * 网页：wry（macOS 用 WKWebView，Windows 用 WebView2，都是系统自带内核）
-//!   * 菜单：muda（macOS 原生菜单栏 / Windows 窗口菜单栏）
+//!   * 菜单：macOS 用系统全局菜单栏；其他平台把菜单搬进 WebView 自己的 HTML 顶部 chrome
 //!   * 增强：注入的 JS，配置由 Rust 侧持久化，设置面板按 schema 自动生成
 
 // release 版关掉控制台窗口（Windows 上 Rust 默认会弹一个黑乎乎的 cmd 窗口）。
@@ -13,26 +13,36 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::error::Error;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use muda::MenuEvent;
 use serde_json::Value;
 use tao::{
     dpi::LogicalSize,
     event::{Event, WindowEvent},
     event_loop::{ControlFlow, EventLoopBuilder},
-    window::{Fullscreen, Window, WindowBuilder},
+    window::{Fullscreen, Icon, Window, WindowBuilder},
 };
 use wry::{http::Request, NewWindowResponse, RGBA, WebView, WebViewBuilder};
+
+#[cfg(target_os = "macos")]
+use muda::MenuEvent;
 
 mod config;
 use config::ConfigStore;
 
 const APP_NAME: &str = "WeTube";
 const HOME_URL: &str = "https://www.youtube.com";
+#[allow(dead_code)] // 仅 macOS 菜单里 "项目主页" 用到
 const PROJECT_URL: &str = "http://small32.top:8418/winc0/WeTube";
 
+// 编译时由 build.rs 把 PNG 解码出来的窗口图标 RGBA 字节和尺寸。
+const WINDOW_ICON_RGBA: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/window-icon.rgba"));
+include!(concat!(env!("OUT_DIR"), "/window-icon-dims.rs"));
+use icon_dims as WINDOW_ICON_DIMS;
 /// WeTube 自己的工具栏（后退/前进/刷新/首页/设置）。
 const TOOLBAR_JS: &str = include_str!("ui.js");
+/// 自定义窗口 chrome：图标 + 应用名 + 菜单下拉 + 窗口控制按钮。
+const TITLEBAR_JS: &str = include_str!("titlebar.js");
 /// 增强功能运行时 + 功能实现 + 设置面板。
 const ENHANCER_JS: &str = include_str!(concat!(env!("OUT_DIR"), "/enhancer-bundle.js"));
 /// 功能 CSS 与深黑主题，由 build.rs 转成 JS 字符串常量。
@@ -40,12 +50,18 @@ const ENHANCER_ASSETS_JS: &str = include_str!(concat!(env!("OUT_DIR"), "/enhance
 /// 32 套 DeepDark 配色预设。
 const DEEPDARK_PRESETS_JS: &str = include_str!("enhancer/deepdark-presets.js");
 
-/// 事件循环里流动的消息：工具栏指令、菜单点击、页面标题、或设置面板的配置变更。
+/// 事件循环里流动的消息：工具栏指令、菜单点击、或设置面板的配置变更。
 #[derive(Debug, Clone)]
 enum Command {
     Ipc(String),
+    #[cfg(target_os = "macos")]
     Menu(String),
-    Title(String),
+}
+
+/// 把编译期嵌入的图标字节装成 tao::Icon。任何一步失败（图标文件缺失、PNG 解码异常等）
+/// 都不影响启动——顶多窗口/任务栏没图标。
+fn build_window_icon() -> Option<Icon> {
+    Icon::from_rgba(WINDOW_ICON_RGBA.to_vec(), WINDOW_ICON_DIMS::W, WINDOW_ICON_DIMS::H).ok()
 }
 
 /// 输出错误日志。release 版在 Windows 上没有控制台，直接 eprintln! 会 panic；
@@ -67,23 +83,44 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let event_loop = EventLoopBuilder::<Command>::with_user_event().build();
 
-    let window = WindowBuilder::new()
-        .with_title(APP_NAME)
-        .with_inner_size(LogicalSize::new(1180.0, 760.0))
-        .with_min_inner_size(LogicalSize::new(620.0, 420.0))
-        .build(&event_loop)?;
+    let window = {
+        let mut builder = WindowBuilder::new()
+            .with_title(APP_NAME)
+            .with_inner_size(LogicalSize::new(1180.0, 760.0))
+            .with_min_inner_size(LogicalSize::new(620.0, 420.0))
+            // 设置任务栏 / Alt+Tab / 文件管理器里的图标。HTML chrome 不用这个，
+            // 但留着没有损失。
+            .with_window_icon(build_window_icon());
 
-    // 菜单必须活得比事件循环里的引用久，所以绑在 main 上。
+        // 把原生标题栏去掉，让我们自己的 HTML chrome 控制一切（图标 + 菜单 + 控件）。
+        // macOS 不去掉，否则会失去红绿黄交通灯按钮，而 macOS 系统也习惯原生菜单栏。
+        #[cfg(not(target_os = "macos"))]
+        {
+            builder = builder.with_decorations(false);
+        }
+
+        builder.build(&event_loop)?
+    };
+
+    // macOS 才有原生菜单栏的需求——HTML chrome 上的菜单项直接发 IPC 字符串，
+    // 走这里一样能 dispatch。
+    #[cfg(target_os = "macos")]
     let menu = build_menu()?;
+    #[cfg(target_os = "macos")]
     install_menu(&menu, &window)?;
 
+    #[cfg(target_os = "macos")]
     let menu_proxy = event_loop.create_proxy();
+    #[cfg(target_os = "macos")]
     MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
         let _ = menu_proxy.send_event(Command::Menu(event.id().0.clone()));
     }));
 
+    // 从自定义标题栏"关闭"按钮进来时，事件循环退出要靠这个共享标志触发。
+    // tao 的 Window 没有直接 close()，我们只能让 control_flow = Exit。
+    let window_close_pending = AtomicBool::new(false);
+
     let ipc_proxy = event_loop.create_proxy();
-    let title_proxy = event_loop.create_proxy();
     let webview = WebViewBuilder::new()
         .with_url(HOME_URL)
         // 只注入主框架：这一坨有几百 KB，塞进每个 iframe 纯属浪费
@@ -102,9 +139,6 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
             NewWindowResponse::Deny
         })
-        .with_document_title_changed_handler(move |title: String| {
-            let _ = title_proxy.send_event(Command::Title(title));
-        })
         .build(&window)?;
 
     event_loop.run(move |event, _, control_flow| {
@@ -115,7 +149,6 @@ fn main() -> Result<(), Box<dyn Error>> {
                 event: WindowEvent::CloseRequested,
                 ..
             } => *control_flow = ControlFlow::Exit,
-            Event::UserEvent(Command::Title(title)) => window.set_title(&format_title(&title)),
             Event::UserEvent(Command::Ipc(msg)) => {
                 if let Some(url) = msg.strip_prefix("open:") {
                     if let Err(err) = open::that(url) {
@@ -123,13 +156,20 @@ fn main() -> Result<(), Box<dyn Error>> {
                     }
                     return;
                 }
-                // 设置面板发的是 JSON，工具栏发的是裸命令
+                // 设置面板发的是 JSON，工具栏/菜单发的是裸命令字符串。
+                // `window-close` 之类的窗口控制命令不能直接改 control_flow，
+                // 通过共享标志位告诉事件循环自己退。
+                if msg == "window-close" {
+                    window_close_pending.store(true, Ordering::SeqCst);
+                    return;
+                }
                 match serde_json::from_str::<Value>(&msg) {
                     Ok(Value::Object(payload)) => handle_panel_message(&mut store, &webview, &payload),
                     _ => act(&webview, &window, &msg),
                 }
             }
-            Event::UserEvent(Command::Menu(id)) => {
+            #[cfg(target_os = "macos")]
+Event::UserEvent(Command::Menu(id)) => {
                 if id == "quit" {
                     *control_flow = ControlFlow::Exit;
                 } else if id == "project" {
@@ -142,7 +182,12 @@ fn main() -> Result<(), Box<dyn Error>> {
                     act(&webview, &window, &id);
                 }
             }
+            // 非 macOS 用 HTML 菜单，菜单事件不会触发，无需 dispatch。
             _ => {}
+        }
+
+        if window_close_pending.load(Ordering::SeqCst) {
+            *control_flow = ControlFlow::Exit;
         }
     });
 }
@@ -197,6 +242,11 @@ fn act(webview: &WebView, window: &Window, action: &str) {
             };
             window.set_fullscreen(next);
         }
+        // 窗口控制（被自定义标题栏调用，macOS 上通常不会到这里）。
+        "window-minimize" => window.set_minimized(true),
+        "window-toggle-maximize" => {
+            window.set_maximized(!window.is_maximized());
+        }
         other => log_err(&format!("未知指令: {other}")),
     }
 }
@@ -204,15 +254,6 @@ fn act(webview: &WebView, window: &Window, action: &str) {
 fn eval(webview: &WebView, script: &str) {
     if let Err(err) = webview.evaluate_script(script) {
         log_err(&format!("执行脚本失败: {err}"));
-    }
-}
-
-fn format_title(page_title: &str) -> String {
-    let trimmed = page_title.trim();
-    if trimmed.is_empty() {
-        APP_NAME.to_string()
-    } else {
-        format!("{trimmed} — {APP_NAME}")
     }
 }
 
@@ -225,18 +266,23 @@ fn background_color() -> RGBA {
 }
 
 /// 拼 document-start 注入脚本：先放数据，再放读数据的代码。
+///
+/// titlebar.js 在 ui.js 之前注入——前者依赖图标的 inline 注入先完成，
+/// 后者再往 `document.body` 追加工具栏。
 fn init_script(store: &ConfigStore) -> String {
     format!(
         "window.__YTE_SCHEMA__ = {schema};\n\
          window.__YTE_CONFIG__ = {config};\n\
          {presets}\n\
          {assets}\n\
+         {titlebar}\n\
          {toolbar}\n\
          {enhancer}\n",
         schema = js_literal(store.schema()),
         config = js_literal(&store.full_config().to_string()),
         presets = DEEPDARK_PRESETS_JS,
         assets = ENHANCER_ASSETS_JS,
+        titlebar = TITLEBAR_JS,
         toolbar = TOOLBAR_JS,
         enhancer = ENHANCER_JS,
     )
@@ -268,6 +314,7 @@ fn accel(key: Code, extra: Modifiers) -> Option<Accelerator> {
     Some(Accelerator::new(Some(PRIMARY | extra), key))
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn build_menu() -> Result<Menu, Box<dyn Error>> {
     let nav = Submenu::with_items(
         "导航",
@@ -402,18 +449,14 @@ fn install_menu(menu: &Menu, _window: &Window) -> Result<(), Box<dyn Error>> {
 }
 
 #[cfg(target_os = "windows")]
-fn install_menu(menu: &Menu, window: &Window) -> Result<(), Box<dyn Error>> {
-    use wry::raw_window_handle::{HasWindowHandle, RawWindowHandle};
-
-    let handle = window.window_handle()?;
-    if let RawWindowHandle::Win32(win32) = handle.as_ref() {
-        // SAFETY: hwnd 来自 tao 的窗口句柄，生命周期覆盖整个 main。
-        unsafe { menu.init_for_hwnd(win32.hwnd.get() as isize)? };
-    }
+#[allow(dead_code)] // 仅在 macOS 上调用，但留着方便 Linux 等无原生菜单场景的扩展。
+fn install_menu(_menu: &Menu, _window: &Window) -> Result<(), Box<dyn Error>> {
+    // 自定义 HTML chrome 已经接管菜单，不再挂系统菜单栏到 hwnd。
     Ok(())
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[allow(dead_code)]
 fn install_menu(_menu: &Menu, _window: &Window) -> Result<(), Box<dyn Error>> {
     // Linux 上 muda 需要 GTK 容器，这里暂不支持菜单，工具栏与快捷键依旧可用。
     Ok(())
