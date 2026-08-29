@@ -26,23 +26,26 @@
   const SUPPORT_STYLE = `
 .wetube-support-shift ytd-masthead,
 .wetube-support-shift #masthead-container {
-  /* YouTube 会用 transform 动态收起 masthead，单改 top 会被其定位逻辑抵消。 */
-  transform: translateY(calc(${BAR_HEIGHT}px - 16px)) !important;
+  /* 用 top 而不是 transform 下推：YouTube 自己会用 transform 做「向上滑出」
+   * 收缩动画（translateY(-100%)），再用 transform 覆盖会和它打架；更重要的是
+   * transform 会让内部子元素（含 popup 锚点、命中区）的 getBoundingClientRect
+   * 跟着偏移，而 flyout/侧栏子项的点击 hit-test 依赖真实坐标，transform 错位
+   * 会导致「订阅 / 我」下面的子菜单点击看似无响应。top 是 fixed 定位的原生属性，
+   * 不会影响子元素布局参考。 */
+  top: ${BAR_HEIGHT}px !important;
 }
 .wetube-support-shift #page-manager {
-  /* 保留 YouTube 自己为 masthead 预留的 56px，再追加 WeTube chrome。
-   * 只写 BAR_HEIGHT 会覆盖原值，使分类栏和首页卡片挤进搜索栏。 */
+  /* 保留 YouTube 自己为 masthead 预留的 56px，再追加 WeTube chrome。 */
   margin-top: calc(var(--ytd-masthead-height, 56px) + ${BAR_HEIGHT}px) !important;
 }
 .wetube-support-shift ytd-mini-guide-renderer {
   top: calc(56px + ${BAR_HEIGHT}px) !important;
 }
 .wetube-support-shift ytd-feed-filter-chip-bar-renderer {
-  /* 首页分类栏由 YouTube 单独 sticky 定位，不随 #page-manager 的外边距移动。 */
+  /* chip-bar 本身不是 fixed，用 transform 下推不会影响其 hit-test，保留。 */
   transform: translateY(${BAR_HEIGHT}px) !important;
 }
 .wetube-support-shift ytd-rich-grid-renderer > #contents {
-  /* 分类栏视觉上下移后也要为视频网格保留同等空间，否则第一排封面会压到标签栏。 */
   padding-top: ${BAR_HEIGHT}px !important;
 }
 `;
@@ -86,18 +89,34 @@
       guideOpenRequested = false;
       return;
     }
-    if (guideOpenRequested) return;
 
     const button = document.querySelector(
       "ytd-masthead #guide-button button, ytd-masthead #guide-button yt-icon-button"
     );
     if (!button) {
+      // 还没就绪就稍后再试；之前用 setTimeout(250) + guideOpenRequested 闸门，
+      // 会在「点了一次但没生效」后永远不再点。改成纯重试，不设闸门。
+      if (!syncWideGuide._wait) syncWideGuide._wait = 0;
+      syncWideGuide._wait += 1;
+      if (syncWideGuide._wait > 80) return; // ~20s 上限，别无限重试
       setTimeout(syncWideGuide, 250);
       return;
     }
-    guideOpenRequested = true;
+    syncWideGuide._wait = 0;
     button.click();
     wasWide = true;
+    // 点击后验证：有些时序下 YouTube 还没来得及加 attribute，等下一轮再确认。
+    if (!guideOpenRequested) {
+      guideOpenRequested = true;
+      setTimeout(() => {
+        if (!document.querySelector("ytd-app")?.hasAttribute("guide-persistent-and-visible")) {
+          guideOpenRequested = false;
+          syncWideGuide();
+        } else {
+          guideOpenRequested = false; // 留 false，让 resize/navigate 时再自然展开
+        }
+      }, 400);
+    }
   }
 
   window.addEventListener("resize", () => {
@@ -109,14 +128,13 @@
   window.addEventListener("yt-navigate-finish", () => setTimeout(syncWideGuide, 100));
 
   // 监听路由变化，让 SPA 跳转后能保持正确的下移状态。
+  // 注意：不再包装 history.pushState/replaceState——包装会在 YouTube 的关键 SPA
+  // 点击时序里插队 setTimeout，与 YouTube 内部「close-flyout → pushState → 重新
+  // 渲染侧栏」的步骤产生竞态，导致侧栏（特别是 mini-guide flyout）子项点击后
+  // 既不跳转也不响应。yt-navigate-finish + popstate 已经覆盖所有导航场景，
+  // applyShift 是幂等的，足够。
   window.addEventListener("yt-navigate-finish", () => applyShift(isYouTube()));
   window.addEventListener("popstate", () => applyShift(isYouTube()));
-  const _push = history.pushState;
-  history.pushState = function () {
-    const r = _push.apply(this, arguments);
-    setTimeout(() => applyShift(isYouTube()), 0);
-    return r;
-  };
 
   /* 键盘快捷键：webview 会先吃掉绝大多数按键，窗口级快捷键只能在页面内拦。 */
   window.addEventListener(

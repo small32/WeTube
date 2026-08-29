@@ -307,28 +307,26 @@
 
 	// ---------------------------------------------------------------- SPA 导航
 
-	// YouTube 是单页应用，切视频不会重新加载文档，得自己重放功能。
-	let navigateTimer = null;
+  // YouTube 是单页应用，切视频不会重新加载文档，得自己重放功能。
+  // 不再包装 history.pushState / replaceState：包装会在 YouTube 的 SPA 关键
+  // 点击时序（close-flyout → pushState → 重新渲染侧栏）里插队 scheduleResync，
+  // 制造竞态，导致侧栏（特别是 mini-guide flyout）子项点击后既不跳转也不
+  // 响应。yt-navigate-finish + popstate + yt-page-data-updated 已经覆盖所有
+  // 导航场景，scheduleResync 自身的 250ms 防抖也保证不抖动。
+  let navigateTimer = null;
 
-	function scheduleResync() {
-		clearTimeout(navigateTimer);
-		navigateTimer = setTimeout(() => {
-			void syncAll();
-		}, 250);
-	}
+  function scheduleResync() {
+    clearTimeout(navigateTimer);
+    navigateTimer = setTimeout(() => {
+      void syncAll();
+    }, 250);
+  }
 
-	function installNavigationHooks() {
-		for (const type of ["yt-navigate-start", "yt-navigate-finish", "yt-page-data-updated", "popstate"]) {
-			window.addEventListener(type, scheduleResync, true);
-		}
-		for (const method of ["pushState", "replaceState"]) {
-			const original = history[method].bind(history);
-			history[method] = (...args) => {
-				original(...args);
-				scheduleResync();
-			};
-		}
-	}
+  function installNavigationHooks() {
+    for (const type of ["yt-navigate-start", "yt-navigate-finish", "yt-page-data-updated", "popstate"]) {
+      window.addEventListener(type, scheduleResync, true);
+    }
+  }
 
 	// ---------------------------------------------------------------- 启动
 
