@@ -1,6 +1,6 @@
-//! WeTube — 一个内建 YouTube-Enhancer 的 YouTube 桌面壳。
+//! WeTube — 一个内建 YouTube-Enhancer 的 YouTube 桌面端App。
 //!
-//! 用 Rust 写的 YouTube 桌面壳：macOS 用 WKWebView、Windows 用 WebView2，
+//! 用 Rust 写的 YouTube 桌面端App：macOS 用 WKWebView、Windows 用 WebView2，
 //! 同时支持 macOS 与 Windows。
 //!
 //!   * 窗口：tao（Tauri 的窗口库，winit 的分支）
@@ -415,7 +415,7 @@ fn build_menu() -> Result<Menu, Box<dyn Error>> {
                     Some(AboutMetadata {
                         name: Some(APP_NAME.to_string()),
                         version: Some(env!("CARGO_PKG_VERSION").to_string()),
-                        comments: Some("一个同时支持 macOS 与 Windows 的 YouTube 桌面壳，内建 YouTube-Enhancer".to_string()),
+                        comments: Some("一个同时支持 macOS 与 Windows 的 YouTube 桌面端App，内建 YouTube-Enhancer".to_string()),
                         website: Some(PROJECT_URL.to_string()),
                         ..Default::default()
                     }),
