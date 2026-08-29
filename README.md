@@ -1,8 +1,8 @@
 # WeTube
 
-基于 [MacTube](https://github.com/diontron/MacTube)（macOS 上的 SwiftUI 小应用：
-一个装 youtube.com 的 `WKWebView` 加后退 / 前进 / 刷新三个按钮）的 Rust 重写版。
-同时支持 macOS 和 Windows，并把 [YouTube-Enhancer](https://github.com/YouTube-Enhancer/extension)
+WeTube 是一个用 Rust 重写的 YouTube 桌面壳：一个装 youtube.com 的 `WKWebView` /
+`WebView2`，加后退 / 前进 / 刷新三个按钮（以及更多），同时支持 macOS 和 Windows，
+并把 [YouTube-Enhancer](https://github.com/YouTube-Enhancer/extension)
 扩展的 **58 个功能、135 个可调节项**直接内建进了程序——不是让你去装扩展，是程序自带。
 
 | 平台   | 网页内核                    | 说明                                   |
@@ -144,7 +144,7 @@ icons/
 ## 已知限制
 
 - 工具栏的「内容下推」是针对 YouTube 当前 DOM（`#masthead-container` 等）写的 CSS，
-  YouTube 改版后可能需要跟着调 `src/ui.js` 里的 `.mactube-shift` 规则；
+  YouTube 改版后可能需要跟着调 `src/ui.js` 里的 `.wetube-support-shift` 规则；
   实在不喜欢就按 `Cmd/Ctrl + Shift + B` 藏起来。
 - 后退 / 前进按钮的禁用状态只能粗略判断（`history.length`），SPA 下并不精确。
 - Linux 上能跑（wry 支持 webkit2gtk），但没有菜单，只有工具栏和快捷键。

@@ -2,7 +2,7 @@
 name = "wetube"
 version = "0.1.0"
 edition = "2024"
-description = "WeTube：一个同时支持 macOS 与 Windows 的 YouTube 桌面壳（基于 MacTube 改写，内建 YouTube-Enhancer）"
+description = "WeTube：一个同时支持 macOS 与 Windows 的 YouTube 桌面壳（内建 YouTube-Enhancer）"
 license = "MIT"
 repository = "http://small32.top:8418/winc0/WeTube"
 readme = "README.md"

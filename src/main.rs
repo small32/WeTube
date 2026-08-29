@@ -1,7 +1,7 @@
 //! WeTube — 一个内建 YouTube-Enhancer 的 YouTube 桌面壳。
 //!
-//! 前身是 [MacTube](https://github.com/diontron/MacTube)（macOS 上的 SwiftUI +
-//! WKWebView 小应用），这里用 Rust 重写并同时支持 macOS 与 Windows。
+//! 用 Rust 写的 YouTube 桌面壳：macOS 用 WKWebView、Windows 用 WebView2，
+//! 同时支持 macOS 与 Windows。
 //!
 //!   * 窗口：tao（Tauri 的窗口库，winit 的分支）
 //!   * 网页：wry（macOS 用 WKWebView，Windows 用 WebView2，都是系统自带内核）
