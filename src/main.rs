@@ -8,9 +8,9 @@
 //!   * 菜单：macOS 用系统全局菜单栏；其他平台把菜单搬进 WebView 自己的 HTML 顶部 chrome
 //!   * 增强：注入的 JS，配置由 Rust 侧持久化，设置面板按 schema 自动生成
 
-// release 版关掉控制台窗口（Windows 上 Rust 默认会弹一个黑乎乎的 cmd 窗口）。
-// debug 版保留，方便开发时看日志。
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+// Windows 上隐藏控制台窗口（debug / release 都隐藏，避免每次启动弹黑框）。
+// 需要看调试日志时，把 eprintln 输出重定向到文件即可。
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 use std::error::Error;
 use std::sync::atomic::{AtomicBool, Ordering};

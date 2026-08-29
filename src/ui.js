@@ -74,6 +74,7 @@
   const WIDE_GUIDE_BREAKPOINT = 1350;
   let wasWide = window.innerWidth >= WIDE_GUIDE_BREAKPOINT;
   let guideOpenRequested = false;
+  let lastAutoClick = 0; // 上次自动点击展开按钮的时间戳（冷却用，防侧栏闪烁）
 
   function syncWideGuide() {
     const wide = window.innerWidth >= WIDE_GUIDE_BREAKPOINT;
@@ -83,8 +84,10 @@
       return;
     }
 
-    const app = document.querySelector("ytd-app");
-    if (app?.hasAttribute("guide-persistent-and-visible")) {
+    // 已经展开就不管。注意：不能只信 guide-persistent-and-visible 这个
+    // attribute——YouTube 设置它有时序延迟，且收起侧栏时未必立刻移除。
+    // 用真实布局判断更可靠。
+    if (isGuideOpen()) {
       wasWide = true;
       guideOpenRequested = false;
       return;
@@ -94,29 +97,35 @@
       "ytd-masthead #guide-button button, ytd-masthead #guide-button yt-icon-button"
     );
     if (!button) {
-      // 还没就绪就稍后再试；之前用 setTimeout(250) + guideOpenRequested 闸门，
-      // 会在「点了一次但没生效」后永远不再点。改成纯重试，不设闸门。
+      // 还没就绪就稍后再试，最多 ~10s，别无限重试。
       if (!syncWideGuide._wait) syncWideGuide._wait = 0;
       syncWideGuide._wait += 1;
-      if (syncWideGuide._wait > 80) return; // ~20s 上限，别无限重试
+      if (syncWideGuide._wait > 40) return;
       setTimeout(syncWideGuide, 250);
       return;
     }
     syncWideGuide._wait = 0;
+
+    // 冷却：点过一次后 2s 内不再自动点。否则 YouTube 展开/收起的 attribute
+    // 和布局更新有延迟，检测到「还没展开」就立刻再点一次，会把刚展开的侧栏
+    // 又收起来，来回点击 → 侧栏不停出现/退出（播放页导航频繁触发尤其明显）。
+    const now = Date.now();
+    if (now - lastAutoClick < 2000) return;
+    lastAutoClick = now;
+
     button.click();
+    guideOpenRequested = true;
     wasWide = true;
-    // 点击后验证：有些时序下 YouTube 还没来得及加 attribute，等下一轮再确认。
-    if (!guideOpenRequested) {
-      guideOpenRequested = true;
-      setTimeout(() => {
-        if (!document.querySelector("ytd-app")?.hasAttribute("guide-persistent-and-visible")) {
-          guideOpenRequested = false;
-          syncWideGuide();
-        } else {
-          guideOpenRequested = false; // 留 false，让 resize/navigate 时再自然展开
-        }
-      }, 400);
-    }
+  }
+
+  /** 完整侧栏是否真的可见（宽 > 100px 且有一定高度）。 */
+  function isGuideOpen() {
+    const app = document.querySelector("ytd-app");
+    if (app?.hasAttribute("guide-persistent-and-visible")) return true;
+    const guide = document.querySelector("ytd-guide-renderer");
+    if (!guide) return false;
+    const rect = guide.getBoundingClientRect();
+    return rect.width > 100 && rect.height > 100;
   }
 
   window.addEventListener("resize", () => {
