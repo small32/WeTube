@@ -1,5 +1,8 @@
 /*
- * 功能样式：从 YouTube-Enhancer 的 features/*/index.css 合并而来。
+ * 功能样式：从 YouTube-Enhancer 的 features 各子目录 index.css 合并而来。
+ *（注意：此注释内不要出现「*」紧跟「/」的序列，否则会被 CSS 解析器当成
+ *  注释结束符提前终止本注释块，把紧随其后的第一条规则整条吞掉——曾导致
+ *  yte-hide-shorts-sidebar 规则丢失、侧栏 Shorts 无法隐藏。）
  *
  * 原版用了 CSS 嵌套（& 语法）和 media range（width <= 1700px），这里一律展开成
  * 传统写法，免得老版本 WebView2 / WKWebView 不认。
