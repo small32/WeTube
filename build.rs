@@ -87,11 +87,13 @@ fn window_icon_rgba() {
 /// 不影响编译和运行。
 #[cfg(target_os = "windows")]
 fn windows_icon() {
-    // 注意：不要设置 FileDescription——任务管理器进程列表的「描述」列显示的就是它，
-    // 之前设成「WeTube — YouTube 桌面壳」导致系统进程里出现「YouTube桌面壳」。
-    // 不设置则描述列留空。
+    // 任务管理器进程列表的「描述」列读取 PE 资源的 FileDescription 字段。
+    // 之前设成「WeTube — YouTube 桌面壳」导致系统进程里出现「YouTube桌面壳」；
+    // 若不设置，winresource 会默认填包名（wetube），仍然会显示。
+    // 显式设为空字符串，让描述列完全空白。
     let result = winresource::WindowsResource::new()
         .set_icon("icons/app.ico")
+        .set("FileDescription", "")
         .set("ProductName", "WeTube")
         .set("CompanyName", "WeTube")
         .set("OriginalFilename", "wetube.exe")
