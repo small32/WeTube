@@ -1,6 +1,6 @@
 # WeTube
 
-WeTube 是一个用 Rust 重写的 YouTube 桌面壳：一个装 youtube.com 的 `WKWebView` /
+WeTube 是一个用 Rust 写的 YouTube 桌面端App：一个装 youtube.com 的 `WKWebView` /
 `WebView2`，加后退 / 前进 / 刷新三个按钮（以及更多），同时支持 macOS 和 Windows，
 并把 [YouTube-Enhancer](https://github.com/YouTube-Enhancer/extension)
 扩展的 **58 个功能、135 个可调节项**直接内建进了程序——不是让你去装扩展，是程序自带。
@@ -139,7 +139,7 @@ icons/
 | 复杂 DOM 注入 | `miniPlayer` `timestampPeek` `playlistLength` `playlistReverseButton` `playlistManagementButtons` |
 
 顺带一提，原扩展的 `pauseBackgroundPlayers` 我没搬——它的作用是暂停**其他标签页**
-的播放器，桌面壳只有一个页面，没有意义。
+的播放器，桌面端App只有一个页面，没有意义。
 
 ## 已知限制
 
@@ -152,13 +152,3 @@ icons/
   （`getVideoData` / `setPlaybackQualityRange` 等）。这些是 YouTube 的私有实现，
   改版就可能失效——原扩展也一样。凡是依赖内部 API 的地方都做了能力探测，
   拿不到就静默降级，不会让整个功能崩掉。
-
-## 相比原扩展修掉的问题
-
-移植时顺手修了原仓库几个已知缺陷：
-
-- `getAudioEngine()` 首次调用必然返回 `null`（`return engine` 写在了赋值之前）
-- `AudioContext` 从不 `resume()`，自动播放策略下会静音
-- `OnScreenDisplayManager.handleError` 无限递归，一出错就栈溢出
-- 事件管理器用强引用 `Map` 存 DOM 目标，YouTube 频繁重建节点会泄漏（改用 `WeakMap`）
-- 配置信箱是单槽 + 竞态，并发请求可能永久挂起（改成同步读全局变量）
