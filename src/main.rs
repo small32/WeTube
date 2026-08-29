@@ -63,6 +63,7 @@ const ENHANCER_ASSETS_JS: &str = include_str!(concat!(env!("OUT_DIR"), "/enhance
 /// 32 套 DeepDark 配色预设。
 const DEEPDARK_PRESETS_JS: &str = include_str!("enhancer/deepdark-presets.js");
 
+
 /// 事件循环里流动的消息：工具栏指令、菜单点击、或设置面板的配置变更。
 #[derive(Debug, Clone)]
 enum Command {
@@ -499,12 +500,8 @@ fn start_window_drag(window: &Window) {
     const HTCAPTION: usize = 0x0002;
 
     unsafe extern "system" {
-        fn SendMessageW(
-            hWnd: *mut c_void,
-            Msg: u32,
-            wParam: usize,
-            lParam: isize,
-        ) -> isize;
+        fn ReleaseCapture() -> i32;
+        fn PostMessageW(hWnd: *mut c_void, Msg: u32, wParam: usize, lParam: isize) -> i32;
     }
 
     let handle = match window.window_handle() {
@@ -512,15 +509,15 @@ fn start_window_drag(window: &Window) {
         Err(_) => return,
     };
     if let RawWindowHandle::Win32(win32) = handle.as_ref() {
-        let hwnd = win32.hwnd.get();
+        let hwnd = win32.hwnd.get() as *mut c_void;
         // SAFETY: hwnd 来自 tao 的窗口句柄，生命周期覆盖整个 main。
         unsafe {
-            SendMessageW(
-                hwnd as *mut c_void,
-                WM_SYSCOMMAND,
-                SC_MOVE | HTCAPTION,
-                0,
-            );
+            // 关键：WebView2 在 mousedown 时捕获了鼠标，不释放的话系统的移动循环
+            // 收不到后续鼠标消息，拖动会完全没反应。必须先把捕获放掉。
+            ReleaseCapture();
+            // 用 PostMessage 而非 SendMessage：SendMessage 是同步的，会在处理 IPC
+            // 的回调里直接阻塞进系统移动循环，卡住整个事件循环。投递出去更干净。
+            PostMessageW(hwnd, WM_SYSCOMMAND, SC_MOVE | HTCAPTION, 0);
         }
     }
 }

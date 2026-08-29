@@ -211,6 +211,11 @@
 }
 #wetube-chrome .wetube-toolbar .icon-btn:hover { background: rgba(0, 0, 0, 0.08); }
 #wetube-chrome .wetube-toolbar .icon-btn:active { background: rgba(0, 0, 0, 0.14); }
+#wetube-chrome .wetube-toolbar .icon-btn:disabled {
+  opacity: .32;
+  cursor: default;
+  background: transparent !important;
+}
 #wetube-chrome .wetube-toolbar svg { width: 16px; height: 16px; }
 #wetube-chrome .wetube-toolbar .sep {
   width: 1px;
@@ -325,7 +330,8 @@
       t.textContent = m.label;
       t.addEventListener("click", (ev) => {
         ev.stopPropagation();
-        toggleMenu(triggers.indexOf(t));
+        // 注意：triggers 存的是 {node, menu} 对象，得按 node 找，不能直接 indexOf(t)
+        toggleMenu(triggers.findIndex((entry) => entry.node === t));
       });
       triggers.push({ node: t, menu: m });
       menuStrip.appendChild(t);
@@ -334,6 +340,7 @@
     /* 工具栏（后退/前进/刷新/首页） */
     const tb = document.createElement("div");
     tb.className = "wetube-toolbar";
+    const navButtons = {};
     TOOLBAR_BTNS.forEach((b, i) => {
       if (i > 0) {
         const sep = document.createElement("div");
@@ -346,12 +353,34 @@
       btn.title = b.title;
       btn.setAttribute("aria-label", b.title);
       btn.appendChild(buildToolbarIcon(b.id, 16));
+      // 直接绑在按钮上，不靠事件委托 + closest（点中内部 SVG 时 target 是 path，容易取不到）
+      if (b.id === "back") btn.addEventListener("click", goBack);
+      else if (b.id === "forward") btn.addEventListener("click", goForward);
+      else btn.addEventListener("click", () => send(b.id));
+      navButtons[b.id] = btn;
       tb.appendChild(btn);
     });
-    tb.addEventListener("click", (ev) => {
-      const btn = ev.target.closest && ev.target.closest("button[data-cmd]");
-      if (btn) send(btn.getAttribute("data-cmd"));
-    });
+
+    /* 前进/后退的可用状态：没有历史记录时灰显，避免按钮看起来"点了没反应"。 */
+    let backSteps = 0; // 已经后退了几步，>0 才说明能前进
+    function refreshNav() {
+      if (navButtons.back) navButtons.back.disabled = history.length <= 1;
+      if (navButtons.forward) navButtons.forward.disabled = backSteps <= 0;
+    }
+    function goBack() {
+      if (history.length <= 1) return;
+      backSteps = Math.min(backSteps + 1, history.length - 1);
+      send("back");
+      refreshNav();
+    }
+    function goForward() {
+      if (backSteps <= 0) return;
+      backSteps -= 1;
+      send("forward");
+      refreshNav();
+    }
+    window.addEventListener("popstate", refreshNav);
+    refreshNav();
 
     /* spacer + 窗口控制 */
     const spacer = document.createElement("div");
