@@ -35,6 +35,19 @@ const HOME_URL: &str = "https://www.youtube.com";
 #[allow(dead_code)] // 仅 macOS 菜单里 "项目主页" 用到
 const PROJECT_URL: &str = "http://small32.top:8418/winc0/WeTube";
 
+/// 注入到页面里，让前端知道该用哪种拖拽方式。
+#[cfg(target_os = "windows")]
+const PLATFORM: &str = "windows";
+#[cfg(target_os = "macos")]
+const PLATFORM: &str = "macos";
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+const PLATFORM: &str = "linux";
+
+/// 自定义标题栏拖拽：Windows 上 WebView2 不认 `-webkit-app-region: drag`，
+/// 所以由前端在拖动区按下时发 IPC，这里用系统消息让 OS 接管整个拖动过程。
+#[cfg(target_os = "windows")]
+use wry::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
 // 编译时由 build.rs 把 PNG 解码出来的窗口图标 RGBA 字节和尺寸。
 const WINDOW_ICON_RGBA: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/window-icon.rgba"));
 include!(concat!(env!("OUT_DIR"), "/window-icon-dims.rs"));
@@ -247,7 +260,13 @@ fn act(webview: &WebView, window: &Window, action: &str) {
         "window-toggle-maximize" => {
             window.set_maximized(!window.is_maximized());
         }
-        other => log_err(&format!("未知指令: {other}")),
+        // 前端在标题栏拖动区按下时发来，由系统接管窗口拖动（仅 Windows 有效）。
+        "window-drag" => start_window_drag(window),
+        other => {
+            if other != "window-drag" {
+                log_err(&format!("未知指令: {other}"));
+            }
+        }
     }
 }
 
@@ -273,6 +292,7 @@ fn init_script(store: &ConfigStore) -> String {
     format!(
         "window.__YTE_SCHEMA__ = {schema};\n\
          window.__YTE_CONFIG__ = {config};\n\
+         window.__WETUBE_PLATFORM__ = \"{platform}\";\n\
          {presets}\n\
          {assets}\n\
          {titlebar}\n\
@@ -280,6 +300,7 @@ fn init_script(store: &ConfigStore) -> String {
          {enhancer}\n",
         schema = js_literal(store.schema()),
         config = js_literal(&store.full_config().to_string()),
+        platform = PLATFORM,
         presets = DEEPDARK_PRESETS_JS,
         assets = ENHANCER_ASSETS_JS,
         titlebar = TITLEBAR_JS,
@@ -460,4 +481,46 @@ fn install_menu(_menu: &Menu, _window: &Window) -> Result<(), Box<dyn Error>> {
 fn install_menu(_menu: &Menu, _window: &Window) -> Result<(), Box<dyn Error>> {
     // Linux 上 muda 需要 GTK 容器，这里暂不支持菜单，工具栏与快捷键依旧可用。
     Ok(())
+}
+
+// ---------------------------------------------------------------- 拖拽
+
+/// 让 Windows 接管窗口拖动：向 HWND 发送 `WM_SYSCOMMAND` + `SC_MOVE | HTCAPTION`。
+///
+/// 这个消息会进入系统的模态拖动循环（鼠标被 OS 捕获，跟着光标走，松手结束），
+/// 跟拖原生标题栏完全一致——最大化态下拖动还会自动还原。WebView2 不认
+/// `-webkit-app-region: drag`，所以必须用这条系统消息来代替。
+#[cfg(target_os = "windows")]
+fn start_window_drag(window: &Window) {
+    use std::ffi::c_void;
+
+    const WM_SYSCOMMAND: u32 = 0x0112;
+    const SC_MOVE: usize = 0xF010;
+    const HTCAPTION: usize = 0x0002;
+
+    unsafe extern "system" {
+        fn SendMessageW(
+            hWnd: *mut c_void,
+            Msg: u32,
+            wParam: usize,
+            lParam: isize,
+        ) -> isize;
+    }
+
+    let handle = match window.window_handle() {
+        Ok(h) => h,
+        Err(_) => return,
+    };
+    if let RawWindowHandle::Win32(win32) = handle.as_ref() {
+        let hwnd = win32.hwnd.get();
+        // SAFETY: hwnd 来自 tao 的窗口句柄，生命周期覆盖整个 main。
+        unsafe {
+            SendMessageW(
+                hwnd as *mut c_void,
+                WM_SYSCOMMAND,
+                SC_MOVE | HTCAPTION,
+                0,
+            );
+        }
+    }
 }

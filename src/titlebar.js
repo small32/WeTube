@@ -344,6 +344,22 @@
     chromeEl.append(brand, menuStrip, tb, spacer, ctrls);
     (document.body || document.documentElement).appendChild(chromeEl);
 
+    /* 拖动：Windows 上 WebView2 不支持 -webkit-app-region: drag，
+     * 所以在标题栏的空白区按下时，交给 Rust 用系统消息启动拖动。
+     * 按钮（菜单/工具/窗口控制）和 logo 不参与拖动——它们各自有点击行为。 */
+    chromeEl.addEventListener("mousedown", (ev) => {
+      if (ev.button !== 0) return;
+      if (ev.target.closest("button, .wetube-menu-pop, .wetube-brand")) return;
+      ev.preventDefault();
+      if (window.__WETUBE_PLATFORM__ === "windows") send("window-drag");
+    });
+
+    // 双击标题栏空白处（像原生标题栏一样）切换最大化。
+    chromeEl.addEventListener("dblclick", (ev) => {
+      if (ev.target.closest("button, .wetube-menu-pop, .wetube-brand")) return;
+      send("window-toggle-maximize");
+    });
+
     /* 全屏切换通过 F11 命令做；图标自己不会变（懒得同步），简洁优先 */
 
     /* 全局关闭：点其他位置 / 按 Esc */
