@@ -8,6 +8,10 @@
 //!   * 菜单：muda（macOS 原生菜单栏 / Windows 窗口菜单栏）
 //!   * 增强：注入的 JS，配置由 Rust 侧持久化，设置面板按 schema 自动生成
 
+// release 版关掉控制台窗口（Windows 上 Rust 默认会弹一个黑乎乎的 cmd 窗口）。
+// debug 版保留，方便开发时看日志。
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use std::error::Error;
 
 use muda::MenuEvent;
@@ -42,6 +46,19 @@ enum Command {
     Ipc(String),
     Menu(String),
     Title(String),
+}
+
+/// 输出错误日志。release 版在 Windows 上没有控制台，直接 eprintln! 会 panic；
+/// 这里只在 stderr 确实是终端（即有控制台）时才写。
+fn log_err(message: &str) {
+    #[cfg(target_os = "windows")]
+    {
+        use std::io::IsTerminal;
+        if !std::io::stderr().is_terminal() {
+            return;
+        }
+    }
+    eprintln!("[wetube] {message}");
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -81,7 +98,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         // target="_blank" / window.open 一律交给系统浏览器，别把壳子整个带走。
         .with_new_window_req_handler(|url: String, _features| {
             if let Err(err) = open::that(&url) {
-                eprintln!("[wetube] 打开外部链接失败: {err}");
+                log_err(&format!("打开外部链接失败: {err}"));
             }
             NewWindowResponse::Deny
         })
@@ -102,7 +119,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             Event::UserEvent(Command::Ipc(msg)) => {
                 if let Some(url) = msg.strip_prefix("open:") {
                     if let Err(err) = open::that(url) {
-                        eprintln!("[wetube] 打开外部链接失败: {err}");
+                        log_err(&format!("打开外部链接失败: {err}"));
                     }
                     return;
                 }
@@ -117,7 +134,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     *control_flow = ControlFlow::Exit;
                 } else if id == "project" {
                     if let Err(err) = open::that(PROJECT_URL) {
-                        eprintln!("[wetube] 打开项目主页失败: {err}");
+                        log_err(&format!("打开项目主页失败: {err}"));
                     }
                 } else if id == "settings" {
                     eval(&webview, "window.__YTE?.togglePanel?.()");
@@ -142,12 +159,12 @@ fn handle_panel_message(store: &mut ConfigStore, webview: &WebView, payload: &se
             };
             let value = payload.get("value").cloned().unwrap_or(Value::Null);
             if let Err(err) = store.set(feature, key, value) {
-                eprintln!("[wetube] 保存设置失败: {err}");
+                log_err(&format!("保存设置失败: {err}"));
             }
         }
         Some("config:reset") => {
             if let Err(err) = store.reset(None) {
-                eprintln!("[wetube] 重置设置失败: {err}");
+                log_err(&format!("重置设置失败: {err}"));
             }
             let script = format!(
                 "window.__YTE_CONFIG__ = {}; window.__YTE.syncAll({{force:true}});",
@@ -167,7 +184,7 @@ fn act(webview: &WebView, window: &Window, action: &str) {
         "reload" => eval(webview, "location.reload()"),
         "home" => {
             if let Err(err) = webview.load_url(HOME_URL) {
-                eprintln!("[wetube] 导航失败: {err}");
+                log_err(&format!("导航失败: {err}"));
             }
         }
         "open-external" => eval(webview, "window.ipc.postMessage('open:'+location.href)"),
@@ -180,13 +197,13 @@ fn act(webview: &WebView, window: &Window, action: &str) {
             };
             window.set_fullscreen(next);
         }
-        other => eprintln!("[wetube] 未知指令: {other}"),
+        other => log_err(&format!("未知指令: {other}")),
     }
 }
 
 fn eval(webview: &WebView, script: &str) {
     if let Err(err) = webview.evaluate_script(script) {
-        eprintln!("[wetube] 执行脚本失败: {err}");
+        log_err(&format!("执行脚本失败: {err}"));
     }
 }
 
