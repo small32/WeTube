@@ -102,6 +102,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let event_loop = EventLoopBuilder::<Command>::with_user_event().build();
 
     let window = {
+        // 下面的 with_decorations(false) 只在非 macOS 上执行，macOS 上 mut 用不上。
+        #[cfg_attr(target_os = "macos", allow(unused_mut))]
         let mut builder = WindowBuilder::new()
             .with_title(APP_NAME)
             .with_inner_size(LogicalSize::new(1180.0, 760.0))
@@ -278,7 +280,10 @@ fn act(webview: &WebView, window: &Window, action: &str) {
         "window-toggle-maximize" => {
             window.set_maximized(!window.is_maximized());
         }
-        // 前端在标题栏拖动区按下时发来，由系统接管窗口拖动（仅 Windows 有效）。
+        // 前端在标题栏拖动区按下时发来，由系统接管窗口拖动。
+        // 只有 Windows 需要这条：macOS 的 WKWebView 认 `-webkit-app-region: drag`，
+        // 前端也只在 Windows 下才发这条指令（见 src/titlebar.js）。
+        #[cfg(target_os = "windows")]
         "window-drag" => start_window_drag(window),
         other => {
             if other != "window-drag" {
