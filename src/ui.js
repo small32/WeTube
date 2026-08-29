@@ -24,13 +24,27 @@
   };
 
   const SUPPORT_STYLE = `
-#wetube-support-shift ytd-app,
-#wetube-support-shift ytd-masthead,
-#wetube-support-shift #page-manager,
-#wetube-support-shift #masthead-container,
-#wetube-support-shift #header,
-#wetube-support-shift #container.ytd-searchbox,
-#wetube-support-shift div#top { margin-top: ${BAR_HEIGHT}px !important; }
+.wetube-support-shift ytd-masthead,
+.wetube-support-shift #masthead-container {
+  /* YouTube 会用 transform 动态收起 masthead，单改 top 会被其定位逻辑抵消。 */
+  transform: translateY(calc(${BAR_HEIGHT}px - 16px)) !important;
+}
+.wetube-support-shift #page-manager {
+  /* 保留 YouTube 自己为 masthead 预留的 56px，再追加 WeTube chrome。
+   * 只写 BAR_HEIGHT 会覆盖原值，使分类栏和首页卡片挤进搜索栏。 */
+  margin-top: calc(var(--ytd-masthead-height, 56px) + ${BAR_HEIGHT}px) !important;
+}
+.wetube-support-shift ytd-mini-guide-renderer {
+  top: calc(56px + ${BAR_HEIGHT}px) !important;
+}
+.wetube-support-shift ytd-feed-filter-chip-bar-renderer {
+  /* 首页分类栏由 YouTube 单独 sticky 定位，不随 #page-manager 的外边距移动。 */
+  transform: translateY(${BAR_HEIGHT}px) !important;
+}
+.wetube-support-shift ytd-rich-grid-renderer > #contents {
+  /* 分类栏视觉上下移后也要为视频网格保留同等空间，否则第一排封面会压到标签栏。 */
+  padding-top: ${BAR_HEIGHT}px !important;
+}
 `;
 
   const isYouTube = () =>
@@ -51,6 +65,48 @@
     if (!root) return;
     root.classList.toggle("wetube-support-shift", on);
   }
+
+  /* 最大化/宽屏时使用 YouTube 完整侧栏，普通窗口保留 mini guide。
+   * YouTube 会记住用户上次折叠状态，因此单靠 resize 不一定自动展开。 */
+  const WIDE_GUIDE_BREAKPOINT = 1350;
+  let wasWide = window.innerWidth >= WIDE_GUIDE_BREAKPOINT;
+  let guideOpenRequested = false;
+
+  function syncWideGuide() {
+    const wide = window.innerWidth >= WIDE_GUIDE_BREAKPOINT;
+    if (!wide) {
+      wasWide = false;
+      guideOpenRequested = false;
+      return;
+    }
+
+    const app = document.querySelector("ytd-app");
+    if (app?.hasAttribute("guide-persistent-and-visible")) {
+      wasWide = true;
+      guideOpenRequested = false;
+      return;
+    }
+    if (guideOpenRequested) return;
+
+    const button = document.querySelector(
+      "ytd-masthead #guide-button button, ytd-masthead #guide-button yt-icon-button"
+    );
+    if (!button) {
+      setTimeout(syncWideGuide, 250);
+      return;
+    }
+    guideOpenRequested = true;
+    button.click();
+    wasWide = true;
+  }
+
+  window.addEventListener("resize", () => {
+    const wide = window.innerWidth >= WIDE_GUIDE_BREAKPOINT;
+    if (wide !== wasWide || (wide && !guideOpenRequested)) {
+      setTimeout(syncWideGuide, 100);
+    }
+  });
+  window.addEventListener("yt-navigate-finish", () => setTimeout(syncWideGuide, 100));
 
   // 监听路由变化，让 SPA 跳转后能保持正确的下移状态。
   window.addEventListener("yt-navigate-finish", () => applyShift(isYouTube()));
@@ -114,9 +170,13 @@
   );
 
   if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", mountStyle, { once: true });
+    document.addEventListener("DOMContentLoaded", () => {
+      mountStyle();
+      setTimeout(syncWideGuide, 100);
+    }, { once: true });
   } else {
     mountStyle();
+    setTimeout(syncWideGuide, 100);
   }
   /* DOMContentLoaded 在 document-start 注入时还没到，体例先监听一次。 */
   document.addEventListener("DOMContentLoaded", () => applyShift(isYouTube()), {

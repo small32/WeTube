@@ -22,7 +22,11 @@ use tao::{
     event_loop::{ControlFlow, EventLoopBuilder},
     window::{Fullscreen, Icon, Window, WindowBuilder},
 };
-use wry::{http::Request, NewWindowResponse, RGBA, WebView, WebViewBuilder};
+use wry::{
+    dpi::{PhysicalPosition, PhysicalSize},
+    http::Request,
+    NewWindowResponse, Rect, RGBA, WebView, WebViewBuilder,
+};
 
 #[cfg(target_os = "macos")]
 use muda::MenuEvent;
@@ -159,6 +163,19 @@ fn main() -> Result<(), Box<dyn Error>> {
         *control_flow = ControlFlow::Wait;
 
         match event {
+            Event::WindowEvent {
+                event: WindowEvent::Resized(size),
+                ..
+            } => {
+                // 无边框窗口最大化/还原时，WebView2 不会自动跟随 tao 客户区尺寸。
+                // 显式同步 bounds，避免窗口变大后右侧/底部仍是旧尺寸的空白区域。
+                if let Err(err) = webview.set_bounds(Rect {
+                    position: PhysicalPosition::new(0, 0).into(),
+                    size: PhysicalSize::new(size.width, size.height).into(),
+                }) {
+                    log_err(&format!("调整 WebView 尺寸失败: {err}"));
+                }
+            }
             Event::WindowEvent {
                 event: WindowEvent::CloseRequested,
                 ..

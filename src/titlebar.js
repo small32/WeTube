@@ -421,8 +421,26 @@
     chromeEl.addEventListener("mousedown", (ev) => {
       if (ev.button !== 0) return;
       if (ev.target.closest("button, .wetube-menu-pop, .wetube-brand")) return;
-      ev.preventDefault();
-      if (window.__WETUBE_PLATFORM__ === "windows") send("window-drag");
+
+      // 不要在按下的瞬间进入 Windows 系统拖动循环，否则 WebView 收不到
+      // 第二次点击，下面的 dblclick 永远不会触发。移动超过阈值后才拖动；
+      // 原地按下/松开则完整保留给浏览器识别单击和双击。
+      const startX = ev.screenX;
+      const startY = ev.screenY;
+      let dragging = false;
+      const cleanup = () => {
+        window.removeEventListener("mousemove", onMove, true);
+        window.removeEventListener("mouseup", cleanup, true);
+      };
+      const onMove = (moveEv) => {
+        if (dragging) return;
+        if (Math.hypot(moveEv.screenX - startX, moveEv.screenY - startY) < 4) return;
+        dragging = true;
+        cleanup();
+        if (window.__WETUBE_PLATFORM__ === "windows") send("window-drag");
+      };
+      window.addEventListener("mousemove", onMove, true);
+      window.addEventListener("mouseup", cleanup, true);
     });
 
     // 双击标题栏空白处（像原生标题栏一样）切换最大化。
@@ -488,7 +506,9 @@
         closeAllMenus();
         if (cmd) send(cmd);
       });
-      document.body.appendChild(pop);
+      // 弹层必须留在 chrome 内：样式、z-index 和“点击外部关闭”的选择器
+      // 都以 #wetube-chrome 为作用域。追加到 body 会让弹层变成无样式的普通 div。
+      chromeEl.appendChild(pop);
     }
   }
 
