@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# 前置条件：Gitea 实例上得注册 act_runner，否则这里的 job 会一直排队没人领。
+# 标签对应关系：
+#   self-hosted    → 任何 runner 都行，只跑前端校验（需要 node）
+#   macos-latest   → macOS runner，跑 .app 构建
+#   windows-latest → Windows runner，跑 .exe 构建
+#
+# 只有一个 macOS runner 时，windows-latest 那个 job 会一直排队——这是正常的，
+# 等有 Windows 机器注册进来就会自动开始工作。
+
+jobs:
+  # 只要 node + jsdom，最便宜的一道闸。
+  # 卡的是「为一个平台做的改动悄悄改坏了另一个平台」这类回归——
+  # 三个平台的 DOM 产出差异全在这里断言，不需要真的有 macOS / Windows 机器。
+  verify-ui:
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: 安装 jsdom
+        run: npm install jsdom
+
+      - name: 校验三个平台的 UI 差异
+        run: node scripts/verify-platform-ui.js
+
+  # macOS 构建。历史上 E0425（start_window_drag 未定义）之所以能溜进 main，
+  # 就是因为从来没在 macOS 上编过——这个 job 专门堵这个。
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Rust stable
+        run: |
+          if ! command -v cargo >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          fi
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
+      - name: 构建并打包 WeTube.app
+        run: ./scripts/build-macos-app.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: WeTube-macos
+          path: target/release/WeTube.app
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Rust stable
+        run: |
+          if (!(Get-Command cargo -ErrorAction SilentlyContinue)) {
+            Invoke-WebRequest https://win.rustup.rs/x86_64 -OutFile rustup-init.exe
+            .\rustup-init.exe -y --profile minimal
+          }
+          "$env:USERPROFILE\.cargo\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+
+      - name: 构建 WeTube.exe
+        run: cargo build --release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: WeTube-windows
+          path: target/release/WeTube.exe
