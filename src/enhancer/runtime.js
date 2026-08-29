@@ -1,8 +1,8 @@
 /*
- * YouTube-Enhancer 运行时（桌面壳版）
+ * YouTube-Enhancer 运行时（桌面端App 版）
  *
  * 原版是浏览器扩展，功能代码跑在没有 chrome.* 权限的 embedded 层，靠两个隐藏 div
- * 做「信箱」跟扩展通信。搬到桌面壳之后这层通信直接换成同步的 window.__YTE.config，
+ * 做「信箱」跟扩展通信。搬到桌面端App之后这层通信直接换成同步的 window.__YTE.config，
  * 落盘交给 Rust（走 ipc）。所以功能逻辑基本是原样搬过来的。
  */
 (() => {
