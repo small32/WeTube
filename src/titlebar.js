@@ -50,12 +50,8 @@
     for (const key in attrs) node.setAttribute(key, String(attrs[key]));
     return node;
   }
-  /* 图标形状描述：tag + 属性。 */
+  /* 图标形状描述：tag + 属性。logo 不用 SVG（见 LOGO_DATA_URL，直接用 App 图标）。 */
   const ICON_SHAPES = {
-    logo: [
-      { t: "rect", a: { x: 2, y: 5, width: 20, height: 14, rx: 3.5, fill: "#ff0033" } },
-      { t: "path", a: { d: "M10.2 9.4 16 12l-5.8 2.6z", fill: "#fff" } },
-    ],
     minimize: [
       { t: "rect", a: { x: 4, y: 11, width: 16, height: 2, rx: 0.5, fill: "none", stroke: "currentColor", "stroke-width": 1.6 } },
     ],
@@ -74,6 +70,20 @@
     const svg = svgEl(size);
     for (const s of ICON_SHAPES[name] || []) svg.appendChild(svgShape(s.t, s.a));
     return svg;
+  }
+  /* 品牌 logo：直接用 App 图标（icons/AppIcon.iconset/icon_32x32.png 的 base64）。
+   * 生成方式：python scripts/png-to-source-ico.py 后取 icon_32x32.png 编码。 */
+  const LOGO_DATA_URL =
+    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAKPklEQVR42r1XCVhVVR6/DxDhISIiICg8RFQWFwhBEJRELTFS0xzBErcCtxwTtzQ1t0lnrCzHzMLKar6m+kpDy63S0XIZNEWxEKWHLI/tLbzHfe/de8/5debch/hVMqPTfN+c7/t995xzz/L7r+ccQbhHYYKgYevXu7GpU93vFx+rX3UOnyv83sIEvkDGeg9B8/vXcK2TkeGhkvnvJnEJfqUBL/8wOWl4vPLQ+OGOSVPTlakz0pXc2enKjPw2zF7QhpkFabydKs9cEO+YNj/slxr45Zr3tblT6ByB3FnbsHLdFbpxq4iXdjG2Yw9jL7/O2NYdjG3YytjqDYwtX8vYs6sZW7yCsUXLGJu3hOGpRYzOmifSGflXyBNPb3XkLw6/LxLtA+SE5DnY8KKF/eM8Y99eZPSjYqZs3QFlxTpKFiwlZFYBITkzCZmUQ8ijUwgZN5GQh7IJGfMIIZlZhIwaBzp6PGNZkxl7/EmGiTlmeUJu3n8kcUfy+KEL2O63Gf2pjinV9TK5riek+CglOXkg4yeBZI4DGTkGJDWDkgdSKRkyjJLBSZTEJlASE0+VARzRCVSOTaTKoGSiJI2UpMhYxh75A3NOyHm6QxIur+X2kv0C4+naTZTq6wgxNBFSZQDZ9yHI7HkgaZltSEqjpG8caN84SqPjKQnrR5WgcEr6RFOlbyyVowZSZ//BVOIEpCGpaAnSwdLJV5FihxL65HxFHvvYwPbIukt6ZdLU/ezYaUYqbskcIFu2g4x6mEs+EWTBYigJKVB6RVJ58jQ4UjMgde1BnfHDYM+aCNGvJ7X7h1IxMIyKwRG0JbQvDF0Caa1GS+s7+aG5U1eZPT6byTMWfPwrLbQzYYG6nmTJKpF+fvxncvEaVXa/AzJ2PLh6Ia9cA4UxGBf+EbYHUlz1lkuX0ejuDfm7s7Dxdk2vvrAJnalV0FKTtgetce9K9YIXrdL40EqOCsGTNEcn/izlL7XVB0cGtUfYHSZcvWPZqg1M2fcRUYqPQsmdBSUpDTQqjjpHZ7k2bfzLyzDlLwDhdWtNDW4NGAzFZEL96W9xU/CEODkXljkFqPIPobcET6p369K2OUeZ4E1vaoMIZi5iluTMUXe0oCYKtUFHZeWxFS8wsmazTFauBUke6XIsym3r4NLJJjOavzwC47vvwckJiBYLquYvdJGpWLMWxtf+CktTE0x6PVouX0aFXwC9qfGm5W4+9Bo3QxkncVrTRTYPG8taUsfktiepOwSUEWML2LNrGJnyhKQMTQOJ4V4dGUNp+ADq9PSjjoNfwMqlFQ31uPXZZ7BVV8NcWgqHJNGrebMgcyJVu3bDsPp5UF6/PCITP3C5rnn4cgI+9BAn857QWTL0T2SWoSPndEBgzDw2fxlTxk+RSXwquKe7PJxySO6+1LZslSo5tROKsvGPwnr2nGvTxtIruJo8HIpoh+HMWVQW7cX1N4twLjQcZRpP+gM3wwlO4E1NZ/qB4CnV6OKYcXDK3A4IPDyPzXmGKaOzZcJDiEZEU9orikohkdTs6YvG9NGuDS12Oy31C4D1QLFL0pvv7EOZf5DLFPrde1C18Bk0XbmKCyE6lHl401JO/m8aL7rXRaCzpA/pxxrikp66i4AzI2sey5vPlJHjZMqTiRwaRa3ePdAkuKFBEFAnaGDY+y7KVq5WVYuazCzc+uIwSqIHoYK3K2fMgeHceRguXkJJ4XKc4uq/wnGKO1+RWxuBfVwDN4MiWXVcYgcEVA1Mf5op6Q/J9qA+MApaNPmHwJL3FCxrN8H8/EbULluJ6sKVMK3bjAYemj8tX4Xa1evQvGkb6pYsQ+XaF1D+/DpULFqCmufWonL6LBT7+GOX4E7f4iTe5gQqekSw6uj4f0Ng2lzm1MXJFh6/xogB1FF2zaV26TbUUOSqplIbXG2ZEkh2UR1Hldt9yu3xqolucV/Z2S2A7nTrRIu4Ccq7h7Hq/oM6IDAmex7LyGYOn2DJJLjRlld3uTa3v74HUv+BkIaPgjMqBq1z8yFSilabDa38v+PxXLRmPuyqt9rtsPHwVBOT2raaLQD/7i9YiBe5mYrcveVy/96sqiMCrjAcksYcXYKlJm436zcn4QQgVlZC3LIVTr5A68YtaH3jTYiXSiFeLYP47XdwZD/GsyNPx5/uR+s/L6DV6YSd+4rt9d1oaWiEBIavX3kVm/j8t9xUAr1YdVRcB1GQklnABg9nojZQMnACFp7dXARUKc+XwK7RwMadzMnPAOvcAjiWPwdbRH+IU6fDGhiK1u49YUkZCXHFGth0UbBE9oNxSo4raX21/RWs5w65191bKu8Wyqr6xLVpQPglgdTR+WxQKmvx7iHXch8wnzoNh6pqDvHIcbRyCVqOHIWdHz6W+c9ALFwFc1wCrDxNm7Inw7bxTzD2jIAtOR2m5DSYHxyL+th4ODiBI39+yUXgHU6gwi+E6XUDZt1FQB4x7gmVgNE7UK4SPKjx628gKgRWDtvhY7C4u1PT4aOwxA1F8+JlsC5dhYaYeBgfHIeGiVNh3fAiDEE6akocTtWcYdyxE4ZtL0EEowc3bMYLnMD77lr5BjeBXhc9Wd3zhIvA7cPIPu6xFDoohTX6BJMbfHDtvg9gVxOPKML0+SHouQYa+FlgSBsDfRd/VAeFo5ITqB45Fjd8u6OqWxBu8KO7bnYBfgoMQbWuHyqnPYkWvsb7M2arTkgPdPKl5d17/1wRFZPguocIgrvQfnFk+flaZ0J6rcU/HDc07uTS8BFosthgI5yEoRH1H3wIczM/kC6WwvD2e2g4fBwNx79B46kzqP/yKGr2FKHph+swma2o27kLNbvegNFoxaVT57ElKBhFghsp0fZARaCu8suoqM6uS0n7pfXEbTOIKZnrWe8YdlPj67gsaOjp1HRceKMI3392EN8fP4kLnxajpJhnv2MnUMIJlHxxDCWHjvD6V7h47CRK9h/CmU8O4Az//x3/d3DzNmwP12EP195J7wCnOagPuxbYe1mb+gWPux4fddnZWntC+kWlVwz7UdA6L3PfVFPqUZ6GD/FFDvH88Dmv7+d9n3J8chsfqSHG8QrHdo6XOV7j2M3Bx5LSnlFOKXIIKw/ofeZVQVClv/vRonaq3+YJOaFkct5ZNnQ0q+0Syso9upGrgo98WdBK3ws+0kWO8xznVGh8pJOaLtKHGq30rsZb/rubVj7g4Ssd8fKXz/j3VioHplLxwUmMxWewmwHhpzhp101o/e297irtP1QbiRNyV7U+kFHRohvIWnv2Z9aASGb2j2AmPx0z+oUzY9cwVqcNYSWdAth5zx7silcQ+5G39by/MTCKibohzDYwjRkjh1y/5uWvqt3jzjXsXm/B9rqqrpqYxGHNsUnTzdGJi0wDkgpNAxILTX3jCy0ctUF9C2/49S7U+4UtrVThH7ZU79fr2cquwYsqvAKmlwhCcqwgeHa09r0fpPf7lLpX4W9Lpobb73moqkTUWFWjhHUEnkhUb1bBfgO1T537P72Q/x/lXxThWelzpLJwAAAAAElFTkSuQmCC";
+  function buildLogo(size) {
+    const img = document.createElement("img");
+    img.src = LOGO_DATA_URL;
+    img.width = size;
+    img.height = size;
+    img.alt = "";
+    img.style.display = "block";
+    img.style.borderRadius = "20%";
+    return img;
   }
   /* 工具按钮图标（与上面同一套形状描述）。 */
   const TOOLBAR_ICONS = {
@@ -312,7 +322,7 @@
     const brand = document.createElement("div");
     brand.className = "wetube-brand";
     brand.title = "WeTube";
-    brand.appendChild(buildIcon("logo", 18));
+    brand.appendChild(buildLogo(18));
     const brandText = document.createElement("span");
     brandText.textContent = "WeTube";
     brand.appendChild(brandText);
