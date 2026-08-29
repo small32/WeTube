@@ -15,6 +15,10 @@
   /* 与 src/titlebar.js 里的 BAR_HEIGHT 同步；改一处记得改另一处。 */
   const BAR_HEIGHT = 36;
 
+  /* macOS 上没有自定义 chrome（见 titlebar.js 末尾的平台判断），所以下面给
+   * YouTube 内容让出空间的下推逻辑也必须整个关掉，否则顶部会空出一条 36px。 */
+  const HAS_CHROME = window.__WETUBE_PLATFORM__ !== "macos";
+
   const send = (cmd) => {
     try {
       window.ipc.postMessage(cmd);
@@ -55,6 +59,7 @@
     /(^|\.)youtube-nocookie\.com$/.test(location.hostname);
 
   function mountStyle() {
+    if (!HAS_CHROME) return;
     if (document.getElementById("wetube-support-style")) return;
     const style = document.createElement("style");
     style.id = "wetube-support-style";
@@ -66,7 +71,7 @@
   function applyShift(on) {
     const root = document.documentElement;
     if (!root) return;
-    root.classList.toggle("wetube-support-shift", on);
+    root.classList.toggle("wetube-support-shift", HAS_CHROME && on);
   }
 
   /* 最大化/宽屏时使用 YouTube 完整侧栏，普通窗口保留 mini guide。
@@ -213,6 +218,7 @@
 
   // 显隐整个自定义 chrome（菜单按钮 + 工具栏 + 窗口控制）
   window.__wetubeToggleChrome = () => {
+    if (!HAS_CHROME) return false;
     const bar = document.getElementById("wetube-chrome");
     if (!bar) return false;
     const hidden = bar.style.display === "none";

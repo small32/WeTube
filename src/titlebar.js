@@ -319,22 +319,24 @@
     brand.addEventListener("dblclick", () => send("window-toggle-maximize"));
     brand.addEventListener("click", () => send("home"));
 
-    /* 菜单条 */
+    /* 菜单条：macOS 上由系统菜单栏接管，不渲染 HTML 菜单。 */
     const menuStrip = document.createElement("div");
     menuStrip.className = "wetube-menu-strip";
     const triggers = [];
-    for (const m of MENUS) {
-      const t = document.createElement("button");
-      t.className = "wetube-menu-trigger";
-      t.type = "button";
-      t.textContent = m.label;
-      t.addEventListener("click", (ev) => {
-        ev.stopPropagation();
-        // 注意：triggers 存的是 {node, menu} 对象，得按 node 找，不能直接 indexOf(t)
-        toggleMenu(triggers.findIndex((entry) => entry.node === t));
-      });
-      triggers.push({ node: t, menu: m });
-      menuStrip.appendChild(t);
+    if (window.__WETUBE_PLATFORM__ !== "macos") {
+      for (const m of MENUS) {
+        const t = document.createElement("button");
+        t.className = "wetube-menu-trigger";
+        t.type = "button";
+        t.textContent = m.label;
+        t.addEventListener("click", (ev) => {
+          ev.stopPropagation();
+          // 注意：triggers 存的是 {node, menu} 对象，得按 node 找，不能直接 indexOf(t)
+          toggleMenu(triggers.findIndex((entry) => entry.node === t));
+        });
+        triggers.push({ node: t, menu: m });
+        menuStrip.appendChild(t);
+      }
     }
 
     /* 工具栏（后退/前进/刷新/首页） */
@@ -512,9 +514,15 @@
     }
   }
 
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", mount, { once: true });
-  } else {
-    mount();
+  /* macOS 上整条 HTML chrome 都不渲染：菜单由系统菜单栏提供，窗口控制由原生
+   * 标题栏的交通灯按钮提供。
+   * Windows / Linux 走 with_decorations(false)，原生标题栏被去掉了，必须靠这条
+   * chrome 提供标题栏、菜单和窗口控制，所以照常渲染。 */
+  if (window.__WETUBE_PLATFORM__ !== "macos") {
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", mount, { once: true });
+    } else {
+      mount();
+    }
   }
 })();
