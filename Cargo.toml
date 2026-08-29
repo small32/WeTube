@@ -1,0 +1,28 @@
+[package]
+name = "wetube"
+version = "0.1.0"
+edition = "2024"
+description = "WeTube：一个同时支持 macOS 与 Windows 的 YouTube 桌面壳（基于 MacTube 改写，内建 YouTube-Enhancer）"
+license = "MIT"
+repository = "http://small32.top:8418/winc0/WeTube"
+readme = "README.md"
+
+[dependencies]
+dark-light = "3.0.0"
+dirs = "6.0.0"
+muda = "0.19.3"
+open = "5.4.2"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+tao = "0.37.0"
+thiserror = "2.0.20"
+wry = "0.56.1"
+
+[build-dependencies]
+serde_json = "1.0.151"
+# 只在 Windows 上用到：给 exe 嵌入图标和版本信息，需要 Windows SDK 的 rc.exe。
+winresource = "0.1.31"
+
+[profile.release]
+strip = true
+lto = true

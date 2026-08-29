@@ -1,0 +1,1915 @@
+{
+  "version": 1,
+  "groups": [
+    {
+      "id": "content",
+      "label": "内容过滤",
+      "desc": "隐藏首页、侧栏、评论区里不想看到的东西"
+    },
+    {
+      "id": "player",
+      "label": "播放器",
+      "desc": "播放速度、音量、画质、字幕等播放相关"
+    },
+    {
+      "id": "buttons",
+      "label": "播放器按钮",
+      "desc": "往播放器控制栏或功能菜单里加的快捷按钮"
+    },
+    {
+      "id": "shorts",
+      "label": "Shorts",
+      "desc": "短视频相关"
+    },
+    {
+      "id": "playlist",
+      "label": "播放列表",
+      "desc": "播放列表增强"
+    },
+    {
+      "id": "appearance",
+      "label": "外观",
+      "desc": "主题、布局、每行视频数"
+    },
+    {
+      "id": "advanced",
+      "label": "高级",
+      "desc": "自定义 CSS、链接处理等"
+    }
+  ],
+  "features": [
+    {
+      "id": "hideShorts",
+      "label": "隐藏 Shorts",
+      "desc": "在不同位置隐藏 Shorts 短视频入口",
+      "group": "content",
+      "pages": [
+        "watch",
+        "home",
+        "search",
+        "channel_home",
+        "channel_videos",
+        "channel_posts",
+        "channel_streams",
+        "subscriptions"
+      ],
+      "fields": [
+        {
+          "key": "enabled",
+          "type": "boolean",
+          "default": false,
+          "label": "启用"
+        },
+        {
+          "key": "home.enabled",
+          "type": "boolean",
+          "default": false,
+          "label": "首页",
+          "parent": "enabled"
+        },
+        {
+          "key": "search.enabled",
+          "type": "boolean",
+          "default": false,
+          "label": "搜索结果",
+          "parent": "enabled"
+        },
+        {
+          "key": "sidebar.enabled",
+          "type": "boolean",
+          "default": false,
+          "label": "侧边栏",
+          "parent": "enabled"
+        },
+        {
+          "key": "subscriptions.enabled",
+          "type": "boolean",
+          "default": false,
+          "label": "订阅页",
+          "parent": "enabled"
+        },
+        {
+          "key": "channel.enabled",
+          "type": "boolean",
+          "default": false,
+          "label": "频道页",
+          "parent": "enabled"
+        },
+        {
+          "key": "videos.enabled",
+          "type": "boolean",
+          "default": false,
+          "label": "视频页",
+          "parent": "enabled"
+        }
+      ]
+    },
+    {
+      "id": "hidePosts",
+      "label": "隐藏帖子",
+      "desc": "隐藏首页里的社区帖子",
+      "group": "content",
+      "pages": [
+        "home"
+      ],
+      "fields": [
+        {
+          "key": "enabled",
+          "type": "boolean",
+          "default": false,
+          "label": "启用"
+        }
+      ]
+    },
+    {
+      "id": "hidePlayables",
+      "label": "隐藏 Playables",
+      "desc": "隐藏首页的 Playables 小游戏板块",
+      "group": "content",
+      "fields": [
+        {
+          "key": "enabled",
+          "type": "boolean",
+          "default": false,
+          "label": "启用"
+        }
+      ]
+    },
+    {
+      "id": "hideMembersOnlyVideos",
+      "label": "隐藏会员专享视频",
+      "desc": "隐藏需要付费会员才能看的视频",
+      "group": "content",
+      "fields": [
+        {
+          "key": "enabled",
+          "type": "boolean",
+          "default": false,
+          "label": "启用"
+        }
+      ]
+    },
+    {
+      "id": "hideOfficialArtistVideosFromHomePage",
+      "label": "隐藏首页官方艺人视频",
+      "desc": "隐藏首页里带「官方艺人」标识的视频",
+      "group": "content",
+      "pages": [
+        "home"
+      ],
+      "fields": [
+        {
+          "key": "enabled",
+          "type": "boolean",
+          "default": false,
+          "label": "启用"
+        }
+      ]
+    },
+    {
+      "id": "hidePlaylistRecommendationsFromHomePage",
+      "label": "隐藏首页播放列表推荐",
+      "desc": "隐藏首页推荐的播放列表合集",
+      "group": "content",
+      "pages": [
+        "home"
+      ],
+      "fields": [
+        {
+          "key": "enabled",
+          "type": "boolean",
+          "default": false,
+          "label": "启用"
+        }
+      ]
+    },
+    {
+      "id": "hideSidebarRecommendedVideos",
+      "label": "隐藏侧栏推荐视频",
+      "desc": "隐藏视频页右侧的推荐列表",
+      "group": "content",
+      "pages": [
+        "watch"
+      ],
+      "fields": [
+        {
+          "key": "enabled",
+          "type": "boolean",
+          "default": false,
+          "label": "启用"
+        }
+      ]
+    },
+    {
+      "id": "hideArtificialIntelligence",
+      "label": "隐藏 AI 内容",
+      "desc": "隐藏 AI 摘要、AI 搜索建议、AI 提问入口等",
+      "group": "content",
+      "fields": [
+        {
+          "key": "enabled",
+          "type": "boolean",
+          "default": false,
+          "label": "启用"
+        }
+      ]
+    },
+    {
+      "id": "hideTranslateComment",
+      "label": "隐藏翻译评论按钮",
+      "desc": "隐藏评论下方的「翻译」按钮",
+      "group": "content",
+      "pages": [
+        "watch"
+      ],
+      "fields": [
+        {
+          "key": "enabled",
+          "type": "boolean",
+          "default": false,
+          "label": "启用"
+        }
+      ]
+    },
+    {
+      "id": "hidePaidPromotionBanner",
+      "label": "隐藏付费推广横幅",
+      "desc": "隐藏视频里「包含付费推广」的提示横幅",
+      "group": "content",
+      "pages": [
+        "watch"
+      ],
+      "fields": [
+        {
+          "key": "enabled",
+          "type": "boolean",
+          "default": false,
+          "label": "启用"
+        }
+      ]
+    },
+    {
+      "id": "hideLiveStreamChat",
+      "label": "隐藏直播聊天",
+      "desc": "隐藏直播页面的聊天区域，视频自动占满宽度",
+      "group": "content",
+      "pages": [
+        "live"
+      ],
+      "fields": [
+        {
+          "key": "enabled",
+          "type": "boolean",
+          "default": false,
+          "label": "启用"
+        }
+      ]
+    },
+    {
+      "id": "hideEndScreenCards",
+      "label": "隐藏片尾卡片",
+      "desc": "隐藏视频结尾弹出的推荐卡片",
+      "group": "player",
+      "pages": [
+        "watch"
+      ],
+      "fields": [
+        {
+          "key": "enabled",
+          "type": "boolean",
+          "default": false,
+          "label": "启用"
+        }
+      ]
+    },
+    {
+      "id": "hideScrollBar",
+      "label": "隐藏滚动条",
+      "desc": "隐藏页面滚动条",
+      "group": "appearance",
+      "fields": [
+        {
+          "key": "enabled",
+          "type": "boolean",
+          "default": false,
+          "label": "启用"
+        }
+      ]
+    },
+    {
+      "id": "automaticallyShowMoreVideosOnEndScreen",
+      "label": "片尾显示更多视频",
+      "desc": "视频结尾画面铺满更多推荐视频，而不是只留中间一小块",
+      "group": "player",
+      "pages": [
+        "watch"
+      ],
+      "fields": [
+        {
+          "key": "enabled",
+          "type": "boolean",
+          "default": false,
+          "label": "启用"
+        }
+      ]
+    },
+    {
+      "id": "restoreFullscreenScrolling",
+      "label": "恢复全屏滚动",
+      "desc": "全屏看视频时，鼠标滚轮可以正常滚动页面",
+      "group": "player",
+      "pages": [
+        "watch",
+        "live"
+      ],
+      "fields": [
+        {
+          "key": "enabled",
+          "type": "boolean",
+          "default": false,
+          "label": "启用"
+        }
+      ]
+    },
+    {
+      "id": "blockNumberKeySeeking",
+      "label": "禁用数字键跳转",
+      "desc": "阻止按数字键 0-9 跳转视频进度（在输入框里不受影响）",
+      "group": "player",
+      "pages": [
+        "watch",
+        "live"
+      ],
+      "fields": [
+        {
+          "key": "enabled",
+          "type": "boolean",
+          "default": false,
+          "label": "启用"
+        }
+      ]
+    },
+    {
+      "id": "automaticallyDisableAutoPlay",
+      "label": "自动关闭自动播放",
+      "desc": "每次打开视频都自动关掉自动播放（你自己手动打开后不会被再关）",
+      "group": "player",
+      "pages": [
+        "watch"
+      ],
+      "fields": [
+        {
+          "key": "enabled",
+          "type": "boolean",
+          "default": false,
+          "label": "启用"
+        }
+      ]
+    },
+    {
+      "id": "automaticallyDisableAmbientMode",
+      "label": "自动关闭氛围模式",
+      "desc": "自动关掉播放器的氛围模式（播放器周围的彩色光晕）",
+      "group": "player",
+      "pages": [
+        "watch",
+        "shorts"
+      ],
+      "fields": [
+        {
+          "key": "enabled",
+          "type": "boolean",
+          "default": false,
+          "label": "启用"
+        }
+      ]
+    },
+    {
+      "id": "automaticTheaterMode",
+      "label": "自动进入影院模式",
+      "desc": "打开视频自动切到影院模式",
+      "group": "player",
+      "pages": [
+        "watch",
+        "live"
+      ],
+      "fields": [
+        {
+          "key": "enabled",
+          "type": "boolean",
+          "default": false,
+          "label": "启用"
+        }
+      ]
+    },
+    {
+      "id": "automaticallyMaximizePlayer",
+      "label": "自动最大化播放器",
+      "desc": "打开视频自动把播放器最大化填满页面",
+      "group": "player",
+      "pages": [
+        "watch",
+        "live"
+      ],
+      "fields": [
+        {
+          "key": "enabled",
+          "type": "boolean",
+          "default": false,
+          "label": "启用"
+        }
+      ]
+    },
+    {
+      "id": "automaticallyDisableClosedCaptions",
+      "label": "自动关闭字幕",
+      "desc": "打开视频自动关掉字幕",
+      "group": "player",
+      "pages": [
+        "watch",
+        "live"
+      ],
+      "fields": [
+        {
+          "key": "enabled",
+          "type": "boolean",
+          "default": false,
+          "label": "启用"
+        }
+      ]
+    },
+    {
+      "id": "automaticallyEnableClosedCaptions",
+      "label": "自动开启字幕",
+      "desc": "打开视频自动打开字幕",
+      "group": "player",
+      "pages": [
+        "watch",
+        "live"
+      ],
+      "fields": [
+        {
+          "key": "enabled",
+          "type": "boolean",
+          "default": false,
+          "label": "启用"
+        }
+      ]
+    },
+    {
+      "id": "openYouTubeSettingsOnHover",
+      "label": "悬停展开播放器设置",
+      "desc": "鼠标移到设置齿轮上就自动展开菜单，不用点",
+      "group": "player",
+      "pages": [
+        "watch",
+        "live"
+      ],
+      "fields": [
+        {
+          "key": "enabled",
+          "type": "boolean",
+          "default": false,
+          "label": "启用"
+        }
+      ]
+    },
+    {
+      "id": "skipContinueWatching",
+      "label": "跳过「继续观看」",
+      "desc": "屏蔽刷新后跳回上次观看位置的提示",
+      "group": "player",
+      "pages": [
+        "watch"
+      ],
+      "fields": [
+        {
+          "key": "enabled",
+          "type": "boolean",
+          "default": false,
+          "label": "启用"
+        }
+      ]
+    },
+    {
+      "id": "remainingTime",
+      "label": "显示剩余时间",
+      "desc": "在进度条时间旁边显示还剩多久",
+      "group": "player",
+      "pages": [
+        "watch"
+      ],
+      "fields": [
+        {
+          "key": "enabled",
+          "type": "boolean",
+          "default": false,
+          "label": "启用"
+        }
+      ]
+    },
+    {
+      "id": "shortsAutoScroll",
+      "label": "Shorts 自动滚动",
+      "desc": "一条 Shorts 播完自动滚到下一条",
+      "group": "shorts",
+      "pages": [
+        "shorts"
+      ],
+      "fields": [
+        {
+          "key": "enabled",
+          "type": "boolean",
+          "default": false,
+          "label": "启用"
+        }
+      ]
+    },
+    {
+      "id": "removeRedirect",
+      "label": "还原跳转链接",
+      "desc": "把 youtube.com/redirect 的链接还原成真实地址",
+      "group": "advanced",
+      "fields": [
+        {
+          "key": "enabled",
+          "type": "boolean",
+          "default": false,
+          "label": "启用"
+        }
+      ]
+    },
+    {
+      "id": "shareShortener",
+      "label": "精简分享链接",
+      "desc": "去掉分享链接里多余的参数",
+      "group": "advanced",
+      "pages": [
+        "watch",
+        "shorts",
+        "live",
+        "search"
+      ],
+      "fields": [
+        {
+          "key": "enabled",
+          "type": "boolean",
+          "default": false,
+          "label": "启用"
+        }
+      ]
+    },
+    {
+      "id": "videosPerRow",
+      "label": "每行视频数",
+      "desc": "自定义首页/搜索页网格每行显示几个视频",
+      "group": "appearance",
+      "fields": [
+        {
+          "key": "enabled",
+          "type": "boolean",
+          "default": false,
+          "label": "启用"
+        },
+        {
+          "key": "videosPerRow",
+          "type": "number",
+          "default": 4,
+          "min": 1,
+          "max": 12,
+          "step": 1,
+          "label": "每行个数",
+          "parent": "enabled"
+        }
+      ]
+    },
+    {
+      "id": "customCSS",
+      "label": "自定义 CSS",
+      "desc": "注入你自己的 CSS，实时生效",
+      "group": "advanced",
+      "fields": [
+        {
+          "key": "enabled",
+          "type": "boolean",
+          "default": false,
+          "label": "启用"
+        },
+        {
+          "key": "code",
+          "type": "textarea",
+          "default": "",
+          "label": "CSS 代码",
+          "parent": "enabled",
+          "placeholder": "body { filter: sepia(0.2); }"
+        }
+      ]
+    },
+    {
+      "id": "deepDarkCSS",
+      "label": "深黑主题",
+      "desc": "比 YouTube 自带深色主题更黑的一套配色，32 种预设可选",
+      "group": "appearance",
+      "fields": [
+        {
+          "key": "enabled",
+          "type": "boolean",
+          "default": false,
+          "label": "启用"
+        },
+        {
+          "key": "preset",
+          "type": "select",
+          "default": "Deep-Dark",
+          "label": "预设",
+          "parent": "enabled",
+          "options": [
+            "Deep-Dark",
+            "Discord",
+            "Dracula",
+            "Gruvbox-Dark",
+            "Gruvbox-Light",
+            "Solarized-Dark",
+            "Solarized-Light",
+            "Catppuccin-Mocha",
+            "Arc-Dark",
+            "Breeze-Dark",
+            "Firefox-Dark",
+            "Firefox-Alpenglow-Dark",
+            "Firefox-Dark-91",
+            "Firefox-57",
+            "Mint-Y-Dark",
+            "Vertex-Dark",
+            "Ubuntu-Grey",
+            "Ubuntu-Purple",
+            "Adapta-Nokto",
+            "Adapta-Breath-Nokto",
+            "HavocOS",
+            "Inspired-Dark",
+            "Jisho",
+            "NierAutomata-Dark",
+            "NierAutomata-Light",
+            "9anime",
+            "Black-and-White",
+            "Orange",
+            "Yellow",
+            "Yellow-2",
+            "Custom"
+          ]
+        },
+        {
+          "key": "colors.mainColor",
+          "type": "color",
+          "default": "#367bf0",
+          "label": "主色",
+          "parent": "enabled"
+        },
+        {
+          "key": "colors.mainBackground",
+          "type": "color",
+          "default": "#22242d",
+          "label": "主背景",
+          "parent": "enabled"
+        },
+        {
+          "key": "colors.secondBackground",
+          "type": "color",
+          "default": "#242730",
+          "label": "次级背景",
+          "parent": "enabled"
+        },
+        {
+          "key": "colors.hoverBackground",
+          "type": "color",
+          "default": "#4e5467",
+          "label": "悬停背景",
+          "parent": "enabled"
+        },
+        {
+          "key": "colors.mainText",
+          "type": "color",
+          "default": "#eeeeee",
+          "label": "主文字",
+          "parent": "enabled"
+        },
+        {
+          "key": "colors.dimmerText",
+          "type": "color",
+          "default": "#cccccc",
+          "label": "次要文字",
+          "parent": "enabled"
+        },
+        {
+          "key": "colors.colorShadow",
+          "type": "color",
+          "default": "#383c4a4d",
+          "label": "阴影",
+          "parent": "enabled"
+        }
+      ]
+    },
+    {
+      "id": "playerSpeed",
+      "label": "默认播放速度",
+      "desc": "打开视频时自动应用指定倍速，也可以按频道单独设置",
+      "group": "player",
+      "pages": [
+        "watch",
+        "shorts"
+      ],
+      "fields": [
+        {
+          "key": "enabled",
+          "type": "boolean",
+          "default": false,
+          "label": "启用"
+        },
+        {
+          "key": "speed",
+          "type": "number",
+          "default": 1,
+          "min": 0.25,
+          "max": 16,
+          "step": 0.05,
+          "label": "速度",
+          "parent": "enabled"
+        },
+        {
+          "key": "channelSpeeds",
+          "type": "textarea",
+          "default": "",
+          "label": "按频道设置",
+          "parent": "enabled",
+          "placeholder": "频道ID=1.5\n另一个频道ID=2",
+          "hint": "每行一条：频道ID=倍速。留空则用上面的全局速度"
+        }
+      ]
+    },
+    {
+      "id": "playerQuality",
+      "label": "默认画质",
+      "desc": "打开视频时自动切到指定画质",
+      "group": "player",
+      "pages": [
+        "watch",
+        "shorts",
+        "live"
+      ],
+      "fields": [
+        {
+          "key": "enabled",
+          "type": "boolean",
+          "default": false,
+          "label": "启用"
+        },
+        {
+          "key": "quality",
+          "type": "select",
+          "default": "hd1080",
+          "label": "画质",
+          "parent": "enabled",
+          "options": [
+            "auto",
+            "tiny",
+            "small",
+            "medium",
+            "large",
+            "hd720",
+            "hd1080",
+            "hd1440",
+            "hd2160",
+            "hd2880",
+            "highres"
+          ]
+        },
+        {
+          "key": "fallbackStrategy",
+          "type": "select",
+          "default": "lower",
+          "label": "画质不可用时的退让方向",
+          "parent": "enabled",
+          "options": [
+            "lower",
+            "higher"
+          ]
+        },
+        {
+          "key": "fpsPreference",
+          "type": "select",
+          "default": "default",
+          "label": "帧率偏好",
+          "parent": "enabled",
+          "options": [
+            "default",
+            "higher",
+            "lower"
+          ]
+        },
+        {
+          "key": "preferPremium",
+          "type": "boolean",
+          "default": false,
+          "label": "优先 Premium 高码率",
+          "parent": "enabled"
+        }
+      ]
+    },
+    {
+      "id": "globalVolume",
+      "label": "固定音量",
+      "desc": "每次进视频都把音量设成固定值",
+      "group": "player",
+      "pages": [
+        "watch",
+        "live",
+        "shorts"
+      ],
+      "fields": [
+        {
+          "key": "enabled",
+          "type": "boolean",
+          "default": false,
+          "label": "启用"
+        },
+        {
+          "key": "volume",
+          "type": "number",
+          "default": 25,
+          "min": 0,
+          "max": 100,
+          "step": 1,
+          "label": "音量 (%)",
+          "parent": "enabled"
+        }
+      ]
+    },
+    {
+      "id": "rememberVolume",
+      "label": "记住音量",
+      "desc": "记住你上次调的音量，下次打开视频自动恢复（普通视频和 Shorts 分别记忆）",
+      "group": "player",
+      "pages": [
+        "watch",
+        "live",
+        "shorts"
+      ],
+      "fields": [
+        {
+          "key": "enabled",
+          "type": "boolean",
+          "default": false,
+          "label": "启用"
+        }
+      ]
+    },
+    {
+      "id": "volumeBoost",
+      "label": "音量增强",
+      "desc": "超过 100% 的音量增益。可以在按钮上滚轮调节，Shift 加速 2.5 倍、Ctrl 加速 5 倍",
+      "group": "player",
+      "pages": [
+        "watch",
+        "live",
+        "shorts"
+      ],
+      "fields": [
+        {
+          "key": "enabled",
+          "type": "boolean",
+          "default": false,
+          "label": "启用"
+        },
+        {
+          "key": "mode",
+          "type": "select",
+          "default": "global",
+          "label": "模式",
+          "parent": "enabled",
+          "options": [
+            "global",
+            "per_video"
+          ]
+        },
+        {
+          "key": "amount",
+          "type": "number",
+          "default": 5,
+          "min": 1,
+          "max": 100,
+          "step": 1,
+          "label": "增益 (dB)",
+          "parent": "enabled"
+        },
+        {
+          "key": "button.placement",
+          "type": "select",
+          "default": "player_controls_left",
+          "label": "按钮位置",
+          "parent": "enabled",
+          "options": [
+            "player_controls_left",
+            "player_controls_right",
+            "feature_menu",
+            "below_player"
+          ]
+        },
+        {
+          "key": "button.fullscreenPlacement",
+          "type": "select",
+          "default": "same",
+          "label": "全屏时的位置",
+          "parent": "enabled",
+          "options": [
+            "same",
+            "feature_menu",
+            "player_controls_left",
+            "player_controls_right"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "monoToStereoButton",
+      "label": "单声道转立体声",
+      "desc": "把单声道音源复制成左右两个声道",
+      "group": "buttons",
+      "pages": [
+        "watch",
+        "live"
+      ],
+      "fields": [
+        {
+          "key": "enabled",
+          "type": "boolean",
+          "default": false,
+          "label": "启用"
+        },
+        {
+          "key": "button.placement",
+          "type": "select",
+          "default": "player_controls_left",
+          "label": "按钮位置",
+          "parent": "enabled",
+          "options": [
+            "player_controls_left",
+            "player_controls_right",
+            "feature_menu",
+            "below_player"
+          ]
+        },
+        {
+          "key": "button.fullscreenPlacement",
+          "type": "select",
+          "default": "same",
+          "label": "全屏时的位置",
+          "parent": "enabled",
+          "options": [
+            "same",
+            "feature_menu",
+            "player_controls_left",
+            "player_controls_right"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "defaultToOriginalAudioTrack",
+      "label": "默认原声音轨",
+      "desc": "自动切到视频的原始音轨，而不是配音音轨",
+      "group": "player",
+      "pages": [
+        "watch",
+        "shorts"
+      ],
+      "fields": [
+        {
+          "key": "enabled",
+          "type": "boolean",
+          "default": false,
+          "label": "启用"
+        }
+      ]
+    },
+    {
+      "id": "scrollWheelVolumeControl",
+      "label": "滚轮调音量",
+      "desc": "在播放器上滚鼠标滚轮调音量",
+      "group": "player",
+      "pages": [
+        "watch",
+        "live",
+        "shorts"
+      ],
+      "fields": [
+        {
+          "key": "enabled",
+          "type": "boolean",
+          "default": false,
+          "label": "启用"
+        },
+        {
+          "key": "steps",
+          "type": "number",
+          "default": 5,
+          "min": 1,
+          "max": 50,
+          "step": 1,
+          "label": "步长 (%)",
+          "parent": "enabled"
+        },
+        {
+          "key": "modifierKey",
+          "type": "select",
+          "default": "ctrlKey",
+          "label": "修饰键",
+          "parent": "enabled",
+          "options": [
+            "altKey",
+            "ctrlKey",
+            "shiftKey"
+          ]
+        },
+        {
+          "key": "holdModifierKey",
+          "type": "boolean",
+          "default": false,
+          "label": "需要按住修饰键",
+          "parent": "enabled"
+        },
+        {
+          "key": "holdRightClick",
+          "type": "boolean",
+          "default": false,
+          "label": "需要按住右键",
+          "parent": "enabled"
+        }
+      ]
+    },
+    {
+      "id": "scrollWheelSpeedControl",
+      "label": "滚轮调速度",
+      "desc": "按住修饰键在播放器上滚滚轮调倍速",
+      "group": "player",
+      "pages": [
+        "watch",
+        "shorts"
+      ],
+      "fields": [
+        {
+          "key": "enabled",
+          "type": "boolean",
+          "default": false,
+          "label": "启用"
+        },
+        {
+          "key": "steps",
+          "type": "number",
+          "default": 0.25,
+          "min": 0.05,
+          "max": 2,
+          "step": 0.05,
+          "label": "步长",
+          "parent": "enabled"
+        },
+        {
+          "key": "modifierKey",
+          "type": "select",
+          "default": "altKey",
+          "label": "修饰键",
+          "parent": "enabled",
+          "options": [
+            "altKey",
+            "ctrlKey",
+            "shiftKey"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "playbackSpeedButtons",
+      "label": "倍速加减按钮",
+      "desc": "在播放器上加减倍速的两个按钮",
+      "group": "buttons",
+      "pages": [
+        "watch"
+      ],
+      "fields": [
+        {
+          "key": "enabled",
+          "type": "boolean",
+          "default": false,
+          "label": "启用"
+        },
+        {
+          "key": "speed",
+          "type": "number",
+          "default": 0.25,
+          "min": 0.05,
+          "max": 2,
+          "step": 0.05,
+          "label": "每次调整的步长",
+          "parent": "enabled"
+        },
+        {
+          "key": "button.placement",
+          "type": "select",
+          "default": "player_controls_left",
+          "label": "按钮位置",
+          "parent": "enabled",
+          "options": [
+            "player_controls_left",
+            "player_controls_right",
+            "feature_menu",
+            "below_player"
+          ]
+        },
+        {
+          "key": "button.fullscreenPlacement",
+          "type": "select",
+          "default": "same",
+          "label": "全屏时的位置",
+          "parent": "enabled",
+          "options": [
+            "same",
+            "feature_menu",
+            "player_controls_left",
+            "player_controls_right"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "forwardRewindButtons",
+      "label": "快进快退按钮",
+      "desc": "在播放器上加两个按钮，点击前进/后退指定秒数",
+      "group": "buttons",
+      "pages": [
+        "watch"
+      ],
+      "fields": [
+        {
+          "key": "enabled",
+          "type": "boolean",
+          "default": false,
+          "label": "启用"
+        },
+        {
+          "key": "time",
+          "type": "number",
+          "default": 5,
+          "min": 1,
+          "max": 60,
+          "step": 1,
+          "label": "秒数",
+          "parent": "enabled"
+        },
+        {
+          "key": "button.placement",
+          "type": "select",
+          "default": "player_controls_right",
+          "label": "按钮位置",
+          "parent": "enabled",
+          "options": [
+            "player_controls_left",
+            "player_controls_right",
+            "feature_menu",
+            "below_player"
+          ]
+        },
+        {
+          "key": "button.fullscreenPlacement",
+          "type": "select",
+          "default": "same",
+          "label": "全屏时的位置",
+          "parent": "enabled",
+          "options": [
+            "same",
+            "feature_menu",
+            "player_controls_left",
+            "player_controls_right"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "loopButton",
+      "label": "循环播放按钮",
+      "desc": "在播放器功能菜单里加一个循环开关",
+      "group": "buttons",
+      "pages": [
+        "watch"
+      ],
+      "fields": [
+        {
+          "key": "enabled",
+          "type": "boolean",
+          "default": false,
+          "label": "启用"
+        },
+        {
+          "key": "button.placement",
+          "type": "select",
+          "default": "feature_menu",
+          "label": "按钮位置",
+          "parent": "enabled",
+          "options": [
+            "player_controls_left",
+            "player_controls_right",
+            "feature_menu",
+            "below_player"
+          ]
+        },
+        {
+          "key": "button.fullscreenPlacement",
+          "type": "select",
+          "default": "same",
+          "label": "全屏时的位置",
+          "parent": "enabled",
+          "options": [
+            "same",
+            "feature_menu",
+            "player_controls_left",
+            "player_controls_right"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "maximizePlayerButton",
+      "label": "最大化播放器按钮",
+      "desc": "一键让播放器填满整个页面",
+      "group": "buttons",
+      "pages": [
+        "watch",
+        "live"
+      ],
+      "fields": [
+        {
+          "key": "enabled",
+          "type": "boolean",
+          "default": false,
+          "label": "启用"
+        },
+        {
+          "key": "button.placement",
+          "type": "select",
+          "default": "feature_menu",
+          "label": "按钮位置",
+          "parent": "enabled",
+          "options": [
+            "player_controls_left",
+            "player_controls_right",
+            "feature_menu",
+            "below_player"
+          ]
+        },
+        {
+          "key": "button.fullscreenPlacement",
+          "type": "select",
+          "default": "same",
+          "label": "全屏时的位置",
+          "parent": "enabled",
+          "options": [
+            "same",
+            "feature_menu",
+            "player_controls_left",
+            "player_controls_right"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "miniPlayer",
+      "label": "迷你播放器",
+      "desc": "往下滚动、播放器离开视野时，自动变成悬浮小窗",
+      "group": "player",
+      "pages": [
+        "watch",
+        "live"
+      ],
+      "fields": [
+        {
+          "key": "enabled",
+          "type": "boolean",
+          "default": false,
+          "label": "启用"
+        },
+        {
+          "key": "defaultSize",
+          "type": "select",
+          "default": "400x225",
+          "label": "小窗尺寸",
+          "parent": "enabled",
+          "options": [
+            "320x180",
+            "400x225",
+            "480x270",
+            "560x315"
+          ]
+        },
+        {
+          "key": "defaultPosition",
+          "type": "select",
+          "default": "bottom_right",
+          "label": "小窗位置",
+          "parent": "enabled",
+          "options": [
+            "top_left",
+            "top_center",
+            "top_right",
+            "bottom_left",
+            "bottom_center",
+            "bottom_right"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "miniPlayerButton",
+      "label": "迷你播放器按钮",
+      "desc": "手动开关迷你小窗的按钮",
+      "group": "buttons",
+      "pages": [
+        "watch",
+        "live"
+      ],
+      "fields": [
+        {
+          "key": "enabled",
+          "type": "boolean",
+          "default": false,
+          "label": "启用"
+        },
+        {
+          "key": "button.placement",
+          "type": "select",
+          "default": "below_player",
+          "label": "按钮位置",
+          "parent": "enabled",
+          "options": [
+            "player_controls_left",
+            "player_controls_right",
+            "feature_menu",
+            "below_player"
+          ]
+        },
+        {
+          "key": "button.fullscreenPlacement",
+          "type": "select",
+          "default": "player_controls_right",
+          "label": "全屏时的位置",
+          "parent": "enabled",
+          "options": [
+            "same",
+            "feature_menu",
+            "player_controls_left",
+            "player_controls_right"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "copyTimestampUrlButton",
+      "label": "复制时间点链接",
+      "desc": "一键复制带当前播放进度的视频链接",
+      "group": "buttons",
+      "pages": [
+        "watch"
+      ],
+      "fields": [
+        {
+          "key": "enabled",
+          "type": "boolean",
+          "default": false,
+          "label": "启用"
+        },
+        {
+          "key": "button.placement",
+          "type": "select",
+          "default": "player_controls_right",
+          "label": "按钮位置",
+          "parent": "enabled",
+          "options": [
+            "player_controls_left",
+            "player_controls_right",
+            "feature_menu",
+            "below_player"
+          ]
+        },
+        {
+          "key": "button.fullscreenPlacement",
+          "type": "select",
+          "default": "same",
+          "label": "全屏时的位置",
+          "parent": "enabled",
+          "options": [
+            "same",
+            "feature_menu",
+            "player_controls_left",
+            "player_controls_right"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "screenshotButton",
+      "label": "截图按钮",
+      "desc": "抓取当前视频帧，可存文件或复制到剪贴板",
+      "group": "buttons",
+      "pages": [
+        "watch",
+        "live"
+      ],
+      "fields": [
+        {
+          "key": "enabled",
+          "type": "boolean",
+          "default": false,
+          "label": "启用"
+        },
+        {
+          "key": "saveAs",
+          "type": "select",
+          "default": "file",
+          "label": "保存方式",
+          "parent": "enabled",
+          "options": [
+            "file",
+            "clipboard",
+            "both"
+          ]
+        },
+        {
+          "key": "format",
+          "type": "select",
+          "default": "png",
+          "label": "图片格式",
+          "parent": "enabled",
+          "options": [
+            "png",
+            "jpeg",
+            "webp"
+          ]
+        },
+        {
+          "key": "filename",
+          "type": "string",
+          "default": "Screenshot-{video id}-{date}",
+          "label": "文件名模板",
+          "parent": "enabled",
+          "hint": "可用占位符：{video id} {date} {time} {timestamp} {resolution}"
+        },
+        {
+          "key": "dateFormat",
+          "type": "select",
+          "default": "iso",
+          "label": "日期格式",
+          "parent": "enabled",
+          "options": [
+            "iso",
+            "date",
+            "dateTime",
+            "dayMonthYear"
+          ]
+        },
+        {
+          "key": "timestampFormat",
+          "type": "select",
+          "default": "auto",
+          "label": "时间戳格式",
+          "parent": "enabled",
+          "options": [
+            "auto",
+            "hhmmss",
+            "mmss"
+          ]
+        },
+        {
+          "key": "timestampSeparator",
+          "type": "select",
+          "default": "auto",
+          "label": "时间戳分隔符",
+          "parent": "enabled",
+          "options": [
+            "auto",
+            "colon",
+            "hyphen"
+          ]
+        },
+        {
+          "key": "button.placement",
+          "type": "select",
+          "default": "player_controls_left",
+          "label": "按钮位置",
+          "parent": "enabled",
+          "options": [
+            "player_controls_left",
+            "player_controls_right",
+            "feature_menu",
+            "below_player"
+          ]
+        },
+        {
+          "key": "button.fullscreenPlacement",
+          "type": "select",
+          "default": "same",
+          "label": "全屏时的位置",
+          "parent": "enabled",
+          "options": [
+            "same",
+            "feature_menu",
+            "player_controls_left",
+            "player_controls_right"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "openTranscriptButton",
+      "label": "打开字幕稿按钮",
+      "desc": "一键展开视频的字幕文稿",
+      "group": "buttons",
+      "pages": [
+        "watch"
+      ],
+      "fields": [
+        {
+          "key": "enabled",
+          "type": "boolean",
+          "default": false,
+          "label": "启用"
+        },
+        {
+          "key": "button.placement",
+          "type": "select",
+          "default": "feature_menu",
+          "label": "按钮位置",
+          "parent": "enabled",
+          "options": [
+            "player_controls_left",
+            "player_controls_right",
+            "feature_menu",
+            "below_player"
+          ]
+        },
+        {
+          "key": "button.fullscreenPlacement",
+          "type": "select",
+          "default": "same",
+          "label": "全屏时的位置",
+          "parent": "enabled",
+          "options": [
+            "same",
+            "feature_menu",
+            "player_controls_left",
+            "player_controls_right"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "hideEndScreenCardsButton",
+      "label": "片尾卡片开关按钮",
+      "desc": "在播放器上随时开关片尾推荐卡片",
+      "group": "buttons",
+      "pages": [
+        "watch"
+      ],
+      "fields": [
+        {
+          "key": "enabled",
+          "type": "boolean",
+          "default": false,
+          "label": "启用"
+        },
+        {
+          "key": "button.placement",
+          "type": "select",
+          "default": "player_controls_right",
+          "label": "按钮位置",
+          "parent": "enabled",
+          "options": [
+            "player_controls_left",
+            "player_controls_right",
+            "feature_menu",
+            "below_player"
+          ]
+        },
+        {
+          "key": "button.fullscreenPlacement",
+          "type": "select",
+          "default": "same",
+          "label": "全屏时的位置",
+          "parent": "enabled",
+          "options": [
+            "same",
+            "feature_menu",
+            "player_controls_left",
+            "player_controls_right"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "flipVideoButtons",
+      "label": "画面翻转按钮",
+      "desc": "水平和垂直镜像翻转视频画面",
+      "group": "buttons",
+      "pages": [
+        "watch",
+        "live"
+      ],
+      "fields": [
+        {
+          "key": "enabled",
+          "type": "boolean",
+          "default": false,
+          "label": "启用"
+        },
+        {
+          "key": "button.placement",
+          "type": "select",
+          "default": "player_controls_right",
+          "label": "按钮位置",
+          "parent": "enabled",
+          "options": [
+            "player_controls_left",
+            "player_controls_right",
+            "feature_menu",
+            "below_player"
+          ]
+        },
+        {
+          "key": "button.fullscreenPlacement",
+          "type": "select",
+          "default": "same",
+          "label": "全屏时的位置",
+          "parent": "enabled",
+          "options": [
+            "same",
+            "feature_menu",
+            "player_controls_left",
+            "player_controls_right"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "saveToWatchLaterButton",
+      "label": "稍后观看按钮",
+      "desc": "在视频缩略图上直接加一个「稍后观看」按钮",
+      "group": "buttons",
+      "pages": [
+        "home",
+        "subscriptions",
+        "watch"
+      ],
+      "fields": [
+        {
+          "key": "enabled",
+          "type": "boolean",
+          "default": false,
+          "label": "启用"
+        }
+      ]
+    },
+    {
+      "id": "timestampPeek",
+      "label": "时间戳预览",
+      "desc": "鼠标悬停在评论/简介里的时间戳上时，预览那个时刻的画面",
+      "group": "player",
+      "pages": [
+        "watch"
+      ],
+      "fields": [
+        {
+          "key": "enabled",
+          "type": "boolean",
+          "default": false,
+          "label": "启用"
+        }
+      ]
+    },
+    {
+      "id": "videoHistory",
+      "label": "观看进度记忆",
+      "desc": "记住每个视频看到哪儿了，下次打开可以接着看",
+      "group": "player",
+      "pages": [
+        "watch"
+      ],
+      "fields": [
+        {
+          "key": "enabled",
+          "type": "boolean",
+          "default": false,
+          "label": "启用"
+        },
+        {
+          "key": "resumeType",
+          "type": "select",
+          "default": "prompt",
+          "label": "续播方式",
+          "parent": "enabled",
+          "options": [
+            "prompt",
+            "automatic"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "playlistLength",
+      "label": "显示播放列表时长",
+      "desc": "在播放列表页面显示总时长和总观看时间",
+      "group": "playlist",
+      "pages": [
+        "watch",
+        "playlist"
+      ],
+      "fields": [
+        {
+          "key": "enabled",
+          "type": "boolean",
+          "default": false,
+          "label": "启用"
+        },
+        {
+          "key": "lengthGetMethod",
+          "type": "select",
+          "default": "api",
+          "label": "时长获取方式",
+          "parent": "enabled",
+          "options": [
+            "api",
+            "html"
+          ]
+        },
+        {
+          "key": "watchTimeGetMethod",
+          "type": "select",
+          "default": "youtube",
+          "label": "观看时间统计方式",
+          "parent": "enabled",
+          "options": [
+            "duration",
+            "youtube"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "playlistReverseButton",
+      "label": "倒序播放按钮",
+      "desc": "把播放列表倒过来放",
+      "group": "playlist",
+      "pages": [
+        "playlist",
+        "watch"
+      ],
+      "fields": [
+        {
+          "key": "enabled",
+          "type": "boolean",
+          "default": false,
+          "label": "启用"
+        }
+      ]
+    },
+    {
+      "id": "playlistManagementButtons",
+      "label": "播放列表管理按钮",
+      "desc": "在播放列表里加「移除」「移除全部」「重置」三个按钮",
+      "group": "playlist",
+      "pages": [
+        "playlist"
+      ],
+      "fields": [
+        {
+          "key": "removeButton.enabled",
+          "type": "boolean",
+          "default": false,
+          "label": "移除当前视频"
+        },
+        {
+          "key": "removeAllButton.enabled",
+          "type": "boolean",
+          "default": false,
+          "label": "移除全部"
+        },
+        {
+          "key": "resetButton.enabled",
+          "type": "boolean",
+          "default": false,
+          "label": "重置已移除的"
+        }
+      ]
+    },
+    {
+      "id": "onScreenDisplay",
+      "label": "屏显提示",
+      "desc": "调音量、调速度时在屏幕上显示的提示样式",
+      "group": "appearance",
+      "fields": [
+        {
+          "key": "enabled",
+          "type": "boolean",
+          "default": true,
+          "label": "启用"
+        },
+        {
+          "key": "type",
+          "type": "select",
+          "default": "text",
+          "label": "显示形式",
+          "parent": "enabled",
+          "options": [
+            "text",
+            "line",
+            "circle",
+            "no_display"
+          ]
+        },
+        {
+          "key": "position",
+          "type": "select",
+          "default": "center",
+          "label": "位置",
+          "parent": "enabled",
+          "options": [
+            "top_left",
+            "top_right",
+            "bottom_left",
+            "bottom_right",
+            "center"
+          ]
+        },
+        {
+          "key": "color",
+          "type": "select",
+          "default": "white",
+          "label": "颜色",
+          "parent": "enabled",
+          "options": [
+            "white",
+            "red",
+            "green",
+            "blue",
+            "yellow",
+            "orange",
+            "purple",
+            "pink"
+          ]
+        },
+        {
+          "key": "opacity",
+          "type": "number",
+          "default": 75,
+          "min": 1,
+          "max": 100,
+          "step": 1,
+          "label": "不透明度 (%)",
+          "parent": "enabled"
+        },
+        {
+          "key": "hideTime",
+          "type": "number",
+          "default": 750,
+          "min": 100,
+          "max": 10000,
+          "step": 50,
+          "label": "停留时间 (ms)",
+          "parent": "enabled"
+        },
+        {
+          "key": "padding",
+          "type": "number",
+          "default": 5,
+          "min": 0,
+          "max": 100,
+          "step": 1,
+          "label": "边距 (px)",
+          "parent": "enabled"
+        }
+      ]
+    },
+    {
+      "id": "featureMenu",
+      "label": "功能菜单",
+      "desc": "播放器上那个集中放置功能开关的菜单",
+      "group": "buttons",
+      "fields": [
+        {
+          "key": "openType",
+          "type": "select",
+          "default": "click",
+          "label": "打开方式",
+          "options": [
+            "click",
+            "hover"
+          ]
+        }
+      ]
+    }
+  ]
+}

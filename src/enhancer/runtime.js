@@ -1,0 +1,381 @@
+/*
+ * YouTube-Enhancer 运行时（桌面壳版）
+ *
+ * 原版是浏览器扩展，功能代码跑在没有 chrome.* 权限的 embedded 层，靠两个隐藏 div
+ * 做「信箱」跟扩展通信。搬到桌面壳之后这层通信直接换成同步的 window.__YTE.config，
+ * 落盘交给 Rust（走 ipc）。所以功能逻辑基本是原样搬过来的。
+ */
+(() => {
+	if (window.__YTE) return;
+
+	// ---------------------------------------------------------------- 基础设施
+
+	// Rust 在 document-start 就把这两份数据塞进来了。
+	const YTE = {
+		config: window.__YTE_CONFIG__ ?? {},
+		schema: window.__YTE_SCHEMA__ ?? { features: [], groups: [] },
+		features: Object.create(null),
+		started: false,
+	};
+
+	window.__YTE = YTE;
+
+	const log = (...args) => console.debug("[yte]", ...args);
+
+	// ---------------------------------------------------------------- 配置
+
+	/** 读某个 feature 的配置，key 支持点分路径。 */
+	function cfg(id, key) {
+		const node = YTE.config[id];
+		if (!node) return undefined;
+		if (!key) return node;
+		return key.split(".").reduce((acc, part) => (acc == null ? acc : acc[part]), node);
+	}
+
+	function isEnabled(id) {
+		const node = YTE.config[id];
+		if (!node) return false;
+		// playlistManagementButtons 这类没有顶层 enabled，任一子开关打开就算启用
+		if (node.enabled === undefined) return deepAnyTrue(node);
+		return node.enabled === true;
+	}
+
+	function deepAnyTrue(node) {
+		if (typeof node !== "object" || node === null) return node === true;
+		return Object.values(node).some(deepAnyTrue);
+	}
+
+	/** 改配置：本地立即生效 + 通知 Rust 落盘。 */
+	function setConfig(id, key, value) {
+		const node = (YTE.config[id] ??= {});
+		const parts = key.split(".");
+		let target = node;
+		for (const part of parts.slice(0, -1)) {
+			target = target[part] ??= {};
+		}
+		target[parts.at(-1)] = value;
+		post({ type: "config:set", feature: id, key, value });
+	}
+
+	function post(message) {
+		try {
+			window.ipc.postMessage(JSON.stringify(message));
+		} catch (err) {
+			log("ipc 不可用", err);
+		}
+	}
+
+	// ---------------------------------------------------------------- 页面类型
+
+	function pageType() {
+		const { pathname, search } = location;
+		if (pathname === "/") return "home";
+		if (pathname.startsWith("/watch")) return "watch";
+		if (pathname.startsWith("/shorts")) return "shorts";
+		if (pathname.startsWith("/results")) return "search";
+		if (pathname.startsWith("/feed/subscriptions")) return "subscriptions";
+		if (pathname.startsWith("/playlist")) return "playlist";
+		if (search.includes("list=")) return "playlist";
+		if (/^\/(@|c\/|channel\/|user\/)[^/]+(\/(videos|shorts|streams|posts))?\/?$/.test(pathname)) {
+			const tail = pathname.split("/").filter(Boolean).at(-1);
+			if (tail === "shorts") return "channel_videos";
+			if (tail === "streams") return "channel_streams";
+			if (tail === "posts") return "channel_posts";
+			return pathname.split("/").filter(Boolean).length > 1 ? "channel_videos" : "channel_home";
+		}
+		return "other";
+	}
+
+	// 直播是 watch 页的一种状态，功能依赖里写的 live 也按 watch 匹配，
+	// 具体是不是直播由功能自己在播放器就绪后判断。
+	const LIVE_ALIAS = { live: "watch" };
+
+	function pageAllowed(pages) {
+		if (!pages || pages.length === 0) return true;
+		const current = pageType();
+		return pages.some((page) => (LIVE_ALIAS[page] ?? page) === current);
+	}
+
+	// ---------------------------------------------------------------- 事件管理
+
+	// 按功能名分命名空间，方便整个功能关掉时一次性摘干净。
+	// 原版用强引用 Map，YouTube 频繁重建 DOM 会泄漏，这里改用 WeakMap。
+	const listeners = new WeakMap();
+
+	function addListener(target, type, handler, owner, options) {
+		if (!target) return;
+		let byOwner = listeners.get(target);
+		if (!byOwner) {
+			byOwner = new Map();
+			listeners.set(target, byOwner);
+		}
+		let byType = byOwner.get(owner);
+		if (!byType) {
+			byType = new Map();
+			byOwner.set(owner, byType);
+		}
+		let entries = byType.get(type);
+		if (!entries) {
+			entries = [];
+			byType.set(type, entries);
+		}
+		if (entries.some((entry) => entry.handler === handler)) return;
+		entries.push({ handler, options });
+		target.addEventListener(type, handler, options);
+	}
+
+	function removeListeners(owner) {
+		// WeakMap 没法遍历，所以另存一份 target 清单
+		for (const target of ownedTargets.get(owner) ?? []) {
+			const byOwner = listeners.get(target);
+			const byType = byOwner?.get(owner);
+			if (!byType) continue;
+			for (const [type, entries] of byType) {
+				for (const entry of entries) target.removeEventListener(type, entry.handler, entry.options);
+			}
+			byOwner.delete(owner);
+		}
+		ownedTargets.delete(owner);
+	}
+
+	const ownedTargets = new Map();
+
+	function trackTarget(owner, target) {
+		let set = ownedTargets.get(owner);
+		if (!set) {
+			set = new Set();
+			ownedTargets.set(owner, set);
+		}
+		set.add(target);
+	}
+
+	function on(target, type, handler, owner, options) {
+		trackTarget(owner, target);
+		addListener(target, type, handler, owner, options);
+	}
+
+	// ---------------------------------------------------------------- DOM 等待
+
+	function waitForElement(selector, { timeout = 5000, root = document, all = false } = {}) {
+		return new Promise((resolve) => {
+			const found = all ? root.querySelectorAll(selector) : root.querySelector(selector);
+			if (all ? found.length : found) {
+				resolve(found);
+				return;
+			}
+			const observer = new MutationObserver(() => {
+				const hit = all ? root.querySelectorAll(selector) : root.querySelector(selector);
+				if (all ? hit.length : hit) {
+					observer.disconnect();
+					clearTimeout(timer);
+					resolve(hit);
+				}
+			});
+			observer.observe(root.documentElement ?? root, { childList: true, subtree: true });
+			const timer = setTimeout(() => {
+				observer.disconnect();
+				resolve(all ? root.querySelectorAll(selector) : null);
+			}, timeout);
+		});
+	}
+
+	/** 等播放器对象就绪（YouTube 的 SPA 换视频时会短暂返回上一个视频的数据）。 */
+	function waitForPlayer(timeout = 10000) {
+		return new Promise((resolve) => {
+			const start = performance.now();
+			const tick = async () => {
+				const player = getPlayer();
+				if (player && (await playerReady(player))) {
+					resolve(player);
+					return;
+				}
+				if (performance.now() - start >= timeout) {
+					resolve(null);
+					return;
+				}
+				setTimeout(tick, 200);
+			};
+			void tick();
+		});
+	}
+
+	async function playerReady(player) {
+		try {
+			const state = player.getPlayerStateObject?.();
+			if (state && (!state.isUnstarted || !state.isBuffering)) return true;
+		} catch {
+			/* 内部 API 可能不存在，走 video 兜底 */
+		}
+		const video = player.querySelector?.("video");
+		return Boolean(video && video.readyState >= 2);
+	}
+
+	function getPlayer() {
+		if (pageType() === "shorts") return document.querySelector("div#shorts-player");
+		return document.querySelector("div#movie_player");
+	}
+
+	/** 取播放器数据，并校验它跟当前 URL 是同一个视频。 */
+	async function videoData() {
+		const player = getPlayer();
+		if (!player?.getVideoData) return null;
+		try {
+			const data = await player.getVideoData();
+			const urlId = new URLSearchParams(location.search).get("v");
+			if (urlId && data?.video_id && data.video_id !== urlId) return null;
+			return data ?? null;
+		} catch {
+			return null;
+		}
+	}
+
+	// ---------------------------------------------------------------- 样式注入
+
+	const styleNodes = new Map();
+
+	function setStyle(id, css) {
+		let node = styleNodes.get(id);
+		if (!css) {
+			node?.remove();
+			styleNodes.delete(id);
+			return;
+		}
+		if (!node || !node.isConnected) {
+			node = document.createElement("style");
+			node.id = id;
+			(document.head ?? document.documentElement).appendChild(node);
+			styleNodes.set(id, node);
+		}
+		node.textContent = css;
+	}
+
+	function toggleBodyClass(className, on) {
+		document.body?.classList.toggle(className, Boolean(on));
+	}
+
+	// ---------------------------------------------------------------- 生命周期
+
+	const active = new Map(); // id → { enabled, config }
+
+	function shouldRun(id) {
+		const feature = YTE.schema.features.find((item) => item.id === id);
+		if (!feature) return false;
+		return pageAllowed(feature.pages);
+	}
+
+	async function syncFeature(id, { force = false } = {}) {
+		const impl = YTE.features[id];
+		if (!impl) return;
+
+		const feature = YTE.schema.features.find((item) => item.id === id);
+		const enabled = isEnabled(id) && pageAllowed(feature?.pages);
+		const previous = active.get(id);
+		const config = cfg(id);
+
+		if (!force && previous && previous.enabled === enabled && !configChanged(previous.config, config)) {
+			return;
+		}
+
+		try {
+			if (enabled) {
+				await impl.enable?.(config);
+			} else if (previous?.enabled) {
+				await impl.disable?.(config);
+				removeListeners(id);
+			} else {
+				return;
+			}
+		} catch (err) {
+			log(`功能 ${id} ${enabled ? "启用" : "停用"}失败`, err);
+		}
+		active.set(id, { enabled, config: clone(config) });
+	}
+
+	function configChanged(a, b) {
+		return JSON.stringify(a) !== JSON.stringify(b);
+	}
+
+	function clone(value) {
+		return value == null ? value : JSON.parse(JSON.stringify(value));
+	}
+
+	async function syncAll({ force = false } = {}) {
+		for (const id of Object.keys(YTE.features)) {
+			await syncFeature(id, { force });
+		}
+	}
+
+	// ---------------------------------------------------------------- SPA 导航
+
+	// YouTube 是单页应用，切视频不会重新加载文档，得自己重放功能。
+	let navigateTimer = null;
+
+	function scheduleResync() {
+		clearTimeout(navigateTimer);
+		navigateTimer = setTimeout(() => {
+			void syncAll();
+		}, 250);
+	}
+
+	function installNavigationHooks() {
+		for (const type of ["yt-navigate-start", "yt-navigate-finish", "yt-page-data-updated", "popstate"]) {
+			window.addEventListener(type, scheduleResync, true);
+		}
+		for (const method of ["pushState", "replaceState"]) {
+			const original = history[method].bind(history);
+			history[method] = (...args) => {
+				original(...args);
+				scheduleResync();
+			};
+		}
+	}
+
+	// ---------------------------------------------------------------- 启动
+
+	async function start() {
+		if (YTE.started) return;
+		YTE.started = true;
+		injectBaseStyles();
+		installNavigationHooks();
+		await syncAll({ force: true });
+		log(`已就绪，${Object.keys(YTE.features).length} 个功能`);
+	}
+
+	/** 功能 CSS 全量注入一次，之后靠 body 上的 class 开关，不用反复改样式表。 */
+	function injectBaseStyles() {
+		const css = window.__YTE_STYLES;
+		if (!css) return;
+		const node = document.createElement("style");
+		node.id = "yte-styles";
+		node.textContent = css;
+		(document.head ?? document.documentElement).appendChild(node);
+	}
+
+	if (document.readyState === "loading") {
+		document.addEventListener("DOMContentLoaded", () => void start(), { once: true });
+	} else {
+		void start();
+	}
+
+	// ---------------------------------------------------------------- 导出
+
+	Object.assign(YTE, {
+		cfg,
+		setConfig,
+		isEnabled,
+		pageType,
+		pageAllowed,
+		waitForElement,
+		waitForPlayer,
+		getPlayer,
+		videoData,
+		setStyle,
+		toggleBodyClass,
+		on,
+		off: removeListeners,
+		syncAll,
+		syncFeature,
+		post,
+		log,
+	});
+})();
