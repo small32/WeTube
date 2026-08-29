@@ -93,11 +93,33 @@
 #yte-settings-panel input[type="number"], #yte-settings-panel input[type="text"],
 #yte-settings-panel select, #yte-settings-panel textarea {
 	border: 1px solid var(--yte-panel-line); border-radius: 6px;
-	background: transparent; color: inherit; font: inherit;
+	background: var(--yte-panel-bg); color: var(--yte-panel-fg); font: inherit;
 	padding: 5px 8px; min-width: 132px;
 }
 #yte-settings-panel input[type="number"] { width: 92px; }
 #yte-settings-panel textarea { width: 100%; min-height: 84px; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; resize: vertical; }
+/* select 展开的下拉列表是浏览器/系统渲染的弹层，不继承面板的 background/color。
+ * 必须给 option 显式指定底色与文字色，否则深色面板下会出现白底白字看不清。 */
+#yte-settings-panel select option {
+	background: #ffffff;
+	color: #000000;
+}
+#yte-settings-panel select option:checked,
+#yte-settings-panel select option:hover {
+	background: #e0e0e0; /* 浅色模式：选中/悬停项变浅灰 */
+	color: #000000;
+}
+@media (prefers-color-scheme: dark) {
+	#yte-settings-panel select option {
+		background: #000000;
+		color: #ffffff;
+	}
+	#yte-settings-panel select option:checked,
+	#yte-settings-panel select option:hover {
+		background: #3d3d3d; /* 深色模式：选中/悬停项变浅灰 */
+		color: #ffffff;
+	}
+}
 #yte-settings-panel input[type="color"] {
 	width: 44px; height: 26px; padding: 0; border: 1px solid var(--yte-panel-line);
 	border-radius: 6px; background: transparent; cursor: pointer;
