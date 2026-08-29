@@ -46,7 +46,6 @@ WeTube 是一个用 Rust 写的 YouTube 桌面端App：一个装 youtube.com 的
 
 - **工具栏**（后退 / 前进 / 刷新 / 首页 / 在系统浏览器打开），跟随系统深浅色自动换肤
   - 在 YouTube 页面里会把页面内容整体下推 40px，不遮搜索栏
-  - `Cmd/Ctrl + Shift + B` 可以随时隐藏它
 - **原生菜单栏**：macOS 上有标准的「关于 / 服务 / 隐藏 / 退出 / 编辑 / 窗口」菜单，
   Windows 上有「文件 / 导航 / 视图 / 帮助」
   - 没有菜单栏的 macOS 应用是没法用 `Cmd+Q`、`Cmd+C/V` 的，所以这一块是必需的
@@ -144,8 +143,7 @@ icons/
 ## 已知限制
 
 - 工具栏的「内容下推」是针对 YouTube 当前 DOM（`#masthead-container` 等）写的 CSS，
-  YouTube 改版后可能需要跟着调 `src/ui.js` 里的 `.wetube-support-shift` 规则；
-  实在不喜欢就按 `Cmd/Ctrl + Shift + B` 藏起来。
+  YouTube 改版后可能需要跟着调 `src/ui.js` 里的 `.wetube-support-shift` 规则。
 - 后退 / 前进按钮的禁用状态只能粗略判断（`history.length`），SPA 下并不精确。
 - Linux 上能跑（wry 支持 webkit2gtk），但没有菜单，只有工具栏和快捷键。
 - 大部分功能依赖 YouTube 的 DOM class（`.ytp-*`）和播放器内部 API
