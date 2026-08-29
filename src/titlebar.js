@@ -7,12 +7,17 @@
  * 设计目标：
  *   - 单行布局：左侧 logo + 应用名，中部菜单下拉 + 工具按钮，右侧窗口控制
  *     （最大化/最小化/关闭）
- *   - 大块区域用 `-webkit-app-region: drag` 让用户可以拖动；按钮用
- *     `-webkit-app-region: no-drag` 保留点击。
+ *   - 大块区域在 Windows 上通过 IPC 交给系统拖动（WebView2 不支持
+ *     `-webkit-app-region: drag`），macOS 走原生标题栏。
  *   - 完全跨平台。Rust 端用 `with_decorations(false)` 去掉原生标题栏
  *     （macOS 不去掉），HTML chrome 负责接管一切。
  *   - 菜单下拉用纯 HTML/CSS 弹层实现；点击菜单项发送 IPC 字符串，
  *     与原生菜单共用 `act()` dispatch 路径。
+ *
+ * ⚠️ 重要：YouTube 开启了 Trusted Types，innerHTML 与 DOMParser 全是被管控的 sink，
+ *    直接赋值/解析 SVG 或 HTML 字符串都会被拒。所以图标一律用 createElementNS
+ *    在 SVG 命名空间里逐个节点构建，其他内容用 createElement / textContent / appendChild，
+ *    绝不给 innerHTML 赋裸字符串，否则 mount 会直接抛错。
  */
 (() => {
   if (window.__wetubeChromeMounted) return;
@@ -27,23 +32,64 @@
     }
   };
 
-  /* 单色白色图标，渲染时由 CSS 的 filter 控制颜色 */
-  const ICON = (path) =>
-    `<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">${path}</svg>`;
-  const ICON_PATHS = {
-    minimize:
-      '<rect x="4" y="11" width="16" height="2" rx="0.5" fill="none" stroke="currentColor" stroke-width="1.6"/>',
-    maximize:
-      '<rect x="5" y="5" width="14" height="14" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.6"/>',
-    restore:
-      '<rect x="7" y="7" width="12" height="12" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.6"/>' +
-      '<path d="M9 7V5a1 1 0 0 1 1-1h9a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1h-2" fill="none" stroke="currentColor" stroke-width="1.6"/>',
-    close:
-      '<path d="M6 6l12 12M18 6 6 18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>',
-    logo:
-      '<rect x="2" y="5" width="20" height="14" rx="3.5" fill="#ff0033"/>' +
-      '<path d="M10.2 9.4 16 12l-5.8 2.6z" fill="#fff"/>',
+  /* YouTube 开启了 Trusted Types：innerHTML 和 DOMParser 全是受控 sink，
+   * 直接赋值/解析 HTML 或 SVG 字符串都会被拒。所以图标一律用 createElementNS
+   * 在 SVG 命名空间里逐个节点构建——这是唯一不受 Trusted Types 限制的方式。 */
+  const SVG_NS = "http://www.w3.org/2000/svg";
+
+  function svgEl(size) {
+    const svg = document.createElementNS(SVG_NS, "svg");
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("width", String(size));
+    svg.setAttribute("height", String(size));
+    svg.setAttribute("aria-hidden", "true");
+    return svg;
+  }
+  function svgShape(tag, attrs) {
+    const node = document.createElementNS(SVG_NS, tag);
+    for (const key in attrs) node.setAttribute(key, String(attrs[key]));
+    return node;
+  }
+  /* 图标形状描述：tag + 属性。 */
+  const ICON_SHAPES = {
+    logo: [
+      { t: "rect", a: { x: 2, y: 5, width: 20, height: 14, rx: 3.5, fill: "#ff0033" } },
+      { t: "path", a: { d: "M10.2 9.4 16 12l-5.8 2.6z", fill: "#fff" } },
+    ],
+    minimize: [
+      { t: "rect", a: { x: 4, y: 11, width: 16, height: 2, rx: 0.5, fill: "none", stroke: "currentColor", "stroke-width": 1.6 } },
+    ],
+    maximize: [
+      { t: "rect", a: { x: 5, y: 5, width: 14, height: 14, rx: 1.5, fill: "none", stroke: "currentColor", "stroke-width": 1.6 } },
+    ],
+    restore: [
+      { t: "rect", a: { x: 7, y: 7, width: 12, height: 12, rx: 1.5, fill: "none", stroke: "currentColor", "stroke-width": 1.6 } },
+      { t: "path", a: { d: "M9 7V5a1 1 0 0 1 1-1h9a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1h-2", fill: "none", stroke: "currentColor", "stroke-width": 1.6 } },
+    ],
+    close: [
+      { t: "path", a: { d: "M6 6l12 12M18 6 6 18", fill: "none", stroke: "currentColor", "stroke-width": 1.6, "stroke-linecap": "round" } },
+    ],
   };
+  function buildIcon(name, size) {
+    const svg = svgEl(size);
+    for (const s of ICON_SHAPES[name] || []) svg.appendChild(svgShape(s.t, s.a));
+    return svg;
+  }
+  /* 工具按钮图标（与上面同一套形状描述）。 */
+  const TOOLBAR_ICONS = {
+    back: [{ t: "path", a: { d: "M15 5 L8 12 L15 19", fill: "none", stroke: "currentColor", "stroke-width": 2, "stroke-linecap": "round", "stroke-linejoin": "round" } }],
+    forward: [{ t: "path", a: { d: "M9 5 L16 12 L9 19", fill: "none", stroke: "currentColor", "stroke-width": 2, "stroke-linecap": "round", "stroke-linejoin": "round" } }],
+    reload: [
+      { t: "path", a: { d: "M20.5 12a8.5 8.5 0 1 1-2.49-6.01", fill: "none", stroke: "currentColor", "stroke-width": 2, "stroke-linecap": "round" } },
+      { t: "path", a: { d: "M20.5 3.5v5h-5", fill: "none", stroke: "currentColor", "stroke-width": 2, "stroke-linecap": "round", "stroke-linejoin": "round" } },
+    ],
+    home: [{ t: "path", a: { d: "M4 11.2 12 4.5l8 6.7V20a1 1 0 0 1-1 1h-4.5v-6h-5v6H5a1 1 0 0 1-1-1z", fill: "none", stroke: "currentColor", "stroke-width": 2, "stroke-linejoin": "round" } }],
+  };
+  function buildToolbarIcon(id, size) {
+    const svg = svgEl(size);
+    for (const s of TOOLBAR_ICONS[id] || []) svg.appendChild(svgShape(s.t, s.a));
+    return svg;
+  }
 
   /* 菜单结构定义：label + items[]。点击项发 IPC；空对象 {} 表示分隔线。 */
   const MENUS = [
@@ -76,22 +122,16 @@
     },
     {
       label: "帮助",
-      items: [
-        { id: "project", label: "项目主页", shortcut: "" },
-      ],
+      items: [{ id: "project", label: "项目主页", shortcut: "" }],
     },
   ];
 
-  /* 工具按钮：直接复用 ui.js 的图标和命令 */
+  /* 工具按钮：命令 + 标题；图标形状见 TOOLBAR_ICONS。 */
   const TOOLBAR_BTNS = [
-    { id: "back", title: "后退", svg:
-      '<svg viewBox="0 0 24 24"><path d="M15 5 L8 12 L15 19" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>' },
-    { id: "forward", title: "前进", svg:
-      '<svg viewBox="0 0 24 24"><path d="M9 5 L16 12 L9 19" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>' },
-    { id: "reload", title: "刷新", svg:
-      '<svg viewBox="0 0 24 24"><path d="M20.5 12a8.5 8.5 0 1 1-2.49-6.01" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M20.5 3.5v5h-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>' },
-    { id: "home", title: "首页", svg:
-      '<svg viewBox="0 0 24 24"><path d="M4 11.2 12 4.5l8 6.7V20a1 1 0 0 1-1 1h-4.5v-6h-5v6H5a1 1 0 0 1-1-1z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>' },
+    { id: "back", title: "后退" },
+    { id: "forward", title: "前进" },
+    { id: "reload", title: "刷新" },
+    { id: "home", title: "首页" },
   ];
 
   const STYLE = `
@@ -110,7 +150,6 @@
   -webkit-backdrop-filter: saturate(180%) blur(14px);
   user-select: none;
   -webkit-user-select: none;
-  -webkit-app-region: drag;
 }
 #wetube-chrome button,
 #wetube-chrome .wetube-menu-trigger {
@@ -125,6 +164,7 @@
   letter-spacing: 0.2px;
   opacity: 0.85;
   height: 100%;
+  cursor: default;
 }
 #wetube-chrome .wetube-brand-icon {
   width: 18px; height: 18px;
@@ -209,7 +249,6 @@
   padding: 4px 0;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
   font: 13px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
-  -webkit-app-region: no-drag;
 }
 #wetube-chrome .wetube-menu-pop .item {
   display: flex;
@@ -253,9 +292,6 @@
 }
 `;
 
-  /* 防止菜单里需要切换全屏的"最大化"图标跨页状态变更同步不到 Windows 标题栏 */
-  const isMaximizedQuery = window.matchMedia ? window.matchMedia("(min-width: 0px)") : null;
-
   function mount() {
     if (document.getElementById("wetube-chrome")) return;
 
@@ -271,14 +307,12 @@
     const brand = document.createElement("div");
     brand.className = "wetube-brand";
     brand.title = "WeTube";
-    brand.innerHTML =
-      `<span class="wetube-brand-icon">${ICON(ICON_PATHS.logo)}</span><span>WeTube</span>`;
+    brand.appendChild(buildIcon("logo", 18));
+    const brandText = document.createElement("span");
+    brandText.textContent = "WeTube";
+    brand.appendChild(brandText);
     brand.addEventListener("dblclick", () => send("window-toggle-maximize"));
-    brand.addEventListener("click", (ev) => {
-      // 单击 logo 等价于点 home，不被 drag 拦截（no-drag 区）
-      send("home");
-      ev.preventDefault();
-    });
+    brand.addEventListener("click", () => send("home"));
 
     /* 菜单条 */
     const menuStrip = document.createElement("div");
@@ -300,12 +334,20 @@
     /* 工具栏（后退/前进/刷新/首页） */
     const tb = document.createElement("div");
     tb.className = "wetube-toolbar";
-    tb.innerHTML = TOOLBAR_BTNS
-      .map(
-        (b) =>
-          `<button class="icon-btn" data-cmd="${b.id}" title="${b.title}" aria-label="${b.title}">${b.svg}</button>`
-      )
-      .join('<div class="sep"></div>');
+    TOOLBAR_BTNS.forEach((b, i) => {
+      if (i > 0) {
+        const sep = document.createElement("div");
+        sep.className = "sep";
+        tb.appendChild(sep);
+      }
+      const btn = document.createElement("button");
+      btn.className = "icon-btn";
+      btn.setAttribute("data-cmd", b.id);
+      btn.title = b.title;
+      btn.setAttribute("aria-label", b.title);
+      btn.appendChild(buildToolbarIcon(b.id, 16));
+      tb.appendChild(btn);
+    });
     tb.addEventListener("click", (ev) => {
       const btn = ev.target.closest && ev.target.closest("button[data-cmd]");
       if (btn) send(btn.getAttribute("data-cmd"));
@@ -322,21 +364,21 @@
     btnMin.className = "wetube-winbtn minimize";
     btnMin.title = "最小化";
     btnMin.setAttribute("aria-label", "最小化");
-    btnMin.innerHTML = ICON(ICON_PATHS.minimize);
+    btnMin.appendChild(buildIcon("minimize", 16));
     btnMin.addEventListener("click", () => send("window-minimize"));
 
     const btnMax = document.createElement("button");
     btnMax.className = "wetube-winbtn maximize";
     btnMax.title = "最大化";
     btnMax.setAttribute("aria-label", "最大化");
-    btnMax.innerHTML = ICON(ICON_PATHS.maximize);
+    btnMax.appendChild(buildIcon("maximize", 16));
     btnMax.addEventListener("click", () => send("window-toggle-maximize"));
 
     const btnClose = document.createElement("button");
     btnClose.className = "wetube-winbtn close";
     btnClose.title = "关闭";
     btnClose.setAttribute("aria-label", "关闭");
-    btnClose.innerHTML = ICON(ICON_PATHS.close);
+    btnClose.appendChild(buildIcon("close", 16));
     btnClose.addEventListener("click", () => send("window-close"));
 
     ctrls.append(btnMin, btnMax, btnClose);
@@ -359,8 +401,6 @@
       if (ev.target.closest("button, .wetube-menu-pop, .wetube-brand")) return;
       send("window-toggle-maximize");
     });
-
-    /* 全屏切换通过 F11 命令做；图标自己不会变（懒得同步），简洁优先 */
 
     /* 全局关闭：点其他位置 / 按 Esc */
     document.addEventListener("click", (ev) => {
@@ -391,15 +431,27 @@
       pop.className = "wetube-menu-pop";
       pop.style.top = rect.bottom + "px";
       pop.style.left = rect.left + "px";
-      pop.innerHTML = triggers[idx].menu.items
-        .map((it) => {
-          if (it.sep) return '<div class="sep"></div>';
-          const accel = it.shortcut
-            ? `<span class="accel">${it.shortcut}</span>`
-            : "";
-          return `<div class="item" data-cmd="${it.id}"><span>${it.label}</span>${accel}</div>`;
-        })
-        .join("");
+      triggers[idx].menu.items.forEach((it) => {
+        if (it.sep) {
+          const s = document.createElement("div");
+          s.className = "sep";
+          pop.appendChild(s);
+          return;
+        }
+        const item = document.createElement("div");
+        item.className = "item";
+        item.setAttribute("data-cmd", it.id);
+        const label = document.createElement("span");
+        label.textContent = it.label;
+        item.appendChild(label);
+        if (it.shortcut) {
+          const accel = document.createElement("span");
+          accel.className = "accel";
+          accel.textContent = it.shortcut;
+          item.appendChild(accel);
+        }
+        pop.appendChild(item);
+      });
       pop.addEventListener("click", (ev) => {
         const item = ev.target.closest && ev.target.closest(".item");
         if (!item) return;

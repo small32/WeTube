@@ -759,7 +759,14 @@
 		box.style.cssText =
 			"position:fixed;left:24px;bottom:24px;z-index:2147483000;background:rgba(24,24,24,.94);color:#fff;" +
 			"padding:14px 18px;border-radius:10px;font:14px/1.5 system-ui,sans-serif;box-shadow:0 8px 28px rgba(0,0,0,.45)";
-		box.innerHTML = `<div>上次看到 <b>${formatTime(time)}</b></div>`;
+		// YouTube 开启了 Trusted Types，禁止 innerHTML 赋裸字符串，用 DOM 拼接。
+		const line = document.createElement("div");
+		const lead = document.createElement("span");
+		lead.textContent = "上次看到 ";
+		const bold = document.createElement("b");
+		bold.textContent = formatTime(time);
+		line.append(lead, bold);
+		box.appendChild(line);
 		const jump = document.createElement("button");
 		jump.textContent = "继续播放";
 		jump.style.cssText =
