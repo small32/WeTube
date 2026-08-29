@@ -86,32 +86,32 @@ cargo build --release
 
 ### 图标
 
-`icons/source.ico` 是源文件（脚本会从外部拷进来）。想换图标直接覆盖源文件再跑：
+`icons/source.ico` 是源文件。想换图标，覆盖它（或直接指定路径）后跑一次：
 
 ```bash
-python scripts/make-icons.py /路径/到/新.ico
+python scripts/make-icons.py /路径/到/新.ico   # 顺便存进 icons/source.ico
 # 或者：覆盖 icons/source.ico 后再次运行
 python scripts/make-icons.py
 ```
 
+一次生成两份产物。脚本不依赖 ImageMagick / PIL，标准库就能跑：
+
+| 产物 | 用途 | 怎么来的 |
+| ---- | ---- | -------- |
+| `icons/app.ico` | Windows 嵌进 exe | 源文件原样复制（已含 9 个尺寸） |
+| `icons/AppIcon.iconset/*.png` | macOS 打包，`iconutil` 的输入 | 由源文件最大尺寸插值生成，10 个文件 |
+
 要分发给别人的话，把 ad-hoc 签名换成 Developer ID 并做公证，否则对方会看到
 「无法检查是否包含恶意软件」的提示。
-
-### 图标
-
-`icons/AppIcon.iconset/` 是 macOS 用的，直接用原版仓库的 PNG 拼的。
-Windows 的 `icons/app.ico` 由这个 iconset 生成：
-
-```bash
-python scripts/make-ico.py
-```
 
 ## 项目结构
 
 ```
 src/main.rs              窗口、webview、菜单、IPC、配置落盘
 src/config.rs            读 schema → 默认值 + 用户覆盖 → 持久化（含单元测试）
-src/ui.js                WeTube 工具栏 + 页面内快捷键
+src/titlebar.js          自定义窗口 chrome（工具栏 + 菜单条 + 窗口控制）
+                         注：macOS 上不渲染，见上文「构建」
+src/ui.js                YouTube 内容下推避让 + 页面内快捷键
 src/enhancer/
   schema.json            135 个配置项的单一数据源（Rust 与 JS 共用）
   runtime.js             配置读写、事件命名空间、元素等待、播放器封装、SPA 重放
@@ -121,6 +121,10 @@ src/enhancer/
   deepdark-presets.js    32 套 DeepDark 配色（由原仓库 TS 自动生成，勿手改）
   deepdark-material.css  DeepDark 主题主体，3989 行
 build.rs                 打包注入脚本、CSS 转 JS 常量、Windows 图标资源
+scripts/
+  build-macos-app.sh     macOS 构建并打包成 .app
+  make-icons.py          从源 ico 生成 app.ico 与 AppIcon.iconset
+  verify-platform-ui.js  三平台 UI 差异校验（jsdom，改完前端跑一遍）
 icons/
   source.ico             源图标
   app.ico                Windows 嵌入用
