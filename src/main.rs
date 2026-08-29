@@ -92,7 +92,7 @@ fn log_err(message: &str) {
             return;
         }
     }
-    eprintln!("[wetube] {message}");
+    eprintln!("[WeTube] {message}");
 }
 
 fn main() -> Result<(), Box<dyn Error>> {

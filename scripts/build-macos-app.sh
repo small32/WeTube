@@ -25,7 +25,7 @@ CONTENTS="$APP_DIR/Contents"
 rm -rf "$APP_DIR"
 mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Resources"
 
-cp "$BIN_DIR/wetube" "$CONTENTS/MacOS/$APP_NAME"
+cp "$BIN_DIR/WeTube" "$CONTENTS/MacOS/$APP_NAME"
 
 if [ -d "$ICONSET" ] && command -v iconutil >/dev/null 2>&1; then
   iconutil -c icns "$ICONSET" -o "$CONTENTS/Resources/AppIcon.icns"

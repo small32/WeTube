@@ -65,7 +65,7 @@ WeTube 是一个用 Rust 重写的 YouTube 桌面壳：一个装 youtube.com 的
 
 ```bash
 cargo build --release
-# 产物：target/release/wetube.exe
+# 产物：target/release/WeTube.exe
 ```
 
 > 图标嵌入需要 Windows SDK 里的 `rc.exe`（装了 MSVC 生成工具就有了）。
