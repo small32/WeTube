@@ -5,13 +5,26 @@ fn main() {
     bundle_enhancer();
     window_icon_rgba();
 
-    #[cfg(target_os = "windows")]
-    windows_icon();
+    // ⚠️ 这里不能用 #[cfg(target_os = "windows")]。build.rs 是为**宿主**编译的，
+    // 那个 cfg 判断的也是宿主系统，不是目标系统——从 macOS 交叉编译 Windows 时
+    // 它整个是 false，windows_icon() 连编译都不会编进去，产物就没有图标。
+    // 判断目标系统只能靠 CARGO_CFG_TARGET_OS 这个环境变量。
+    if target_os() == "windows" {
+        windows_icon();
+    }
 
     println!("cargo:rerun-if-changed=src/enhancer");
     println!("cargo:rerun-if-changed=src/ui.js");
     println!("cargo:rerun-if-changed=src/titlebar.js");
     println!("cargo:rerun-if-changed=icons");
+}
+
+/// 目标系统的名字（`windows` / `macos` / `linux`…）。
+///
+/// build.rs 里判断目标系统只能读 `CARGO_CFG_TARGET_OS`——`cfg!(target_os)` 和
+/// `#[cfg(target_os)]` 在这里都指向宿主，交叉编译时会给出错误答案。
+fn target_os() -> String {
+    std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default()
 }
 
 /// 把注入脚本拼成一个文件，省得运行时每次启动都做字符串拼接。
@@ -83,9 +96,13 @@ fn window_icon_rgba() {
 
 /// 给 Windows 可执行文件塞进图标和版本信息。
 ///
-/// 需要 Windows SDK 里的 rc.exe（装了 MSVC 生成工具就有）。找不到的话只是没有图标，
-/// 不影响编译和运行。
-#[cfg(target_os = "windows")]
+/// 需要资源编译器：Windows 上是 SDK 的 rc.exe，交叉编译（macOS / Linux → Windows）
+/// 时用 MinGW 的 windres，路径可以用 `WINDRES` 环境变量指定。找不到的话只是没有
+/// 图标，不影响编译和运行——下面会把失败降级成 warning。
+///
+/// ⚠️ 不要给这个函数加 `#[cfg(target_os = "windows")]`：那样从非 Windows 宿主
+/// 交叉编译时它根本不存在，图标就永远嵌不进去。调用点已经用 `target_os()` 判断了，
+/// 这里必须让它无条件参与编译（winresource 是纯 Rust 的，任何平台都能编）。
 fn windows_icon() {
     // 任务管理器进程列表的「描述」列读取 PE 资源的 FileDescription 字段。
     // 之前设成「WeTube — YouTube 桌面壳」导致系统进程里出现「YouTube桌面壳」；

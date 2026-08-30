@@ -73,8 +73,13 @@ cargo build --release
 # 产物：target/release/WeTube.exe
 ```
 
-> 图标嵌入需要 Windows SDK 里的 `rc.exe`（装了 MSVC 生成工具就有了）。
+> 图标嵌入需要资源编译器：Windows 上用 SDK 里的 `rc.exe`（装了 MSVC 生成工具就有），
+> 从 macOS / Linux 交叉编译时用 MinGW 的 `windres`（可用 `WINDRES` 环境变量指定路径）。
 > 找不到也只是没有图标，照样能编译和运行。
+>
+> 交叉编译：`rustup target add x86_64-pc-windows-gnu && cargo build --release --target x86_64-pc-windows-gnu`。
+> 判断目标系统走的是 `CARGO_CFG_TARGET_OS` 环境变量——`build.rs` 里的
+> `#[cfg(target_os)]` 判断的是**宿主**而不是目标，用它会让交叉编译时图标整个跳过。
 
 ### macOS
 
