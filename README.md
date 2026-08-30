@@ -52,9 +52,11 @@ WeTube 是一个用 Rust 写的 YouTube 桌面端App：一个装 youtube.com 的
 - **键盘快捷键**：`Cmd/Ctrl + R` 或 `F5` 刷新、`Cmd/Ctrl + ←/→` 或 `Alt + ←/→` 前进后退、
   `Cmd/Ctrl + Shift + H` 回首页、`F11` 全屏
   - 除 `F5` / `Alt + ←/→` 这几个浏览器惯例别名外，全部可以自己改，见下方「快捷键设置」
-- **全屏联动**：播放页上窗口全屏和播放器全屏是绑定的——按 `F11` 或菜单里的
-  「切换全屏」，视频会跟着真正铺满；点播放器自己的全屏按钮，窗口也会一并全屏。
-  非播放页（首页、订阅页）只切窗口全屏。
+- **全屏联动（单向）**：点播放器自己的全屏按钮时，App 窗口会一并全屏，退出时
+  跟着还原。
+  反方向没做：按 `F11` 或菜单里的「切换全屏」只切窗口全屏，视频仍是页面里的
+  常规尺寸，需要再点一下播放器的全屏按钮。原因是合成调用拿不到用户激活，
+  WebKit 会拒绝 `requestFullscreen()`；用 CSS 兜底的方案试过，副作用太多，已回退。
 - **外链不乱跑**：`target="_blank"` 和 `window.open` 一律交给系统默认浏览器，
   不会把整个壳子带走到别的网站
 - **窗口标题跟着视频走**：显示成「视频标题 — WeTube」
@@ -155,7 +157,7 @@ scripts/
   make-icons.py          从源 ico 生成 app.ico 与 AppIcon.iconset
   verify-platform-ui.js  三平台 UI 差异校验（jsdom，改完前端跑一遍）
   verify-shortcuts.js    快捷键面板功能验证（jsdom，20 项断言）
-  verify-fullscreen.js   播放器全屏联动验证（jsdom，8 项断言）
+  verify-fullscreen.js   全屏联动验证（jsdom，7 项断言）
 icons/
   source.ico             源图标
   app.ico                Windows 嵌入用
