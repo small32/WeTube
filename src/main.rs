@@ -201,6 +201,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 // 不加这个判断会把正在全屏播放的视频一次次踢回小窗。
                 let full = window.fullscreen().is_some();
                 if full != was_fullscreen {
+                    debug_log(&format!("Resized 察觉到全屏变化: {was_fullscreen} → {full}"));
                     was_fullscreen = full;
                     eval(
                         &webview,
@@ -213,6 +214,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 ..
             } => *control_flow = ControlFlow::Exit,
             Event::UserEvent(Command::Ipc(msg)) => {
+                debug_log(&format!("指令来源: 页面 IPC → {msg:?}"));
                 if let Some(url) = msg.strip_prefix("open:") {
                     if let Err(err) = open::that(url) {
                         log_err(&format!("打开外部链接失败: {err}"));
@@ -235,6 +237,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
             #[cfg(target_os = "macos")]
 Event::UserEvent(Command::Menu(id)) => {
+                debug_log(&format!("指令来源: 菜单栏 → {id:?}"));
                 if id == "quit" {
                     *control_flow = ControlFlow::Exit;
                 } else if id == "project" {
@@ -499,6 +502,10 @@ fn act(webview: &WebView, window: &Window, action: &str) {
         // 退出时窗口还原。状态由前端在 fullscreenchange 里上报（见 src/ui.js）。
         "player-fullscreen:on" | "player-fullscreen:off" => {
             let entering = action.ends_with(":on");
+            debug_log(&format!(
+                "播放器上报 entering={entering}，当前窗口全屏={}",
+                window.fullscreen().is_some()
+            ));
             window.set_fullscreen(if entering {
                 Some(Fullscreen::Borderless(None))
             } else {

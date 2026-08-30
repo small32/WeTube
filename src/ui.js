@@ -251,7 +251,9 @@ html.wetube-video-fill video {
       if (!id && ev.altKey && ev.code === "ArrowLeft" && !keyMap.has("Alt+ArrowLeft")) id = "back";
       if (!id && ev.altKey && ev.code === "ArrowRight" && !keyMap.has("Alt+ArrowRight")) id = "forward";
 
-      if (!id) return;
+      // 按住不放时系统会连发 keydown（ev.repeat）。刷新、后退这类连发还说得过去，
+      // 但全屏是开关——连发会把它来回翻转，窗口就"进去又弹出来"。
+      if (!id || ev.repeat) return;
       ev.preventDefault();
       send(id);
     },
