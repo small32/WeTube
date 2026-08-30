@@ -129,6 +129,73 @@ const check = (name, ok, detail) => checks.push([name, ok, detail]);
   );
 }
 
+// ---- 窗口退出全屏时，元素全屏要跟着退 ----
+//
+// 不掉这个会残留 WebKit 的「按 Esc 退出全屏」浮层盖住页面。
+
+{
+  const { window } = setup();
+  check(
+    "暴露 __wetubeExitElementFullscreen",
+    typeof window.__wetubeExitElementFullscreen === "function"
+  );
+}
+
+{
+  // 没有元素全屏时应该是空操作，返回 false
+  const { window } = setup();
+  check(
+    "没有元素全屏时不做任何事",
+    window.__wetubeExitElementFullscreen() === false
+  );
+}
+
+{
+  // 处于元素全屏时调用，应该真的去调 exitFullscreen
+  const { window } = setup();
+  setElementFullscreen(window, {});
+  let called = 0;
+  window.document.exitFullscreen = () => {
+    called++;
+    return Promise.resolve();
+  };
+  const r = window.__wetubeExitElementFullscreen();
+  check("有元素全屏时调用 exitFullscreen", called === 1, `调了 ${called} 次`);
+  check("返回 true", r === true);
+  setElementFullscreen(window, null);
+}
+
+{
+  // exitFullscreen 抛异常不能冒出去（会打断 Rust 那边的 eval）
+  const { window } = setup();
+  setElementFullscreen(window, {});
+  window.document.exitFullscreen = () => {
+    throw new Error("boom");
+  };
+  let threw = false;
+  try {
+    window.__wetubeExitElementFullscreen();
+  } catch (e) {
+    threw = true;
+  }
+  check("exitFullscreen 抛异常不会冒出去", threw === false);
+  setElementFullscreen(window, null);
+}
+
+{
+  // 只有 webkit 前缀的老实现也要能走通
+  const { window } = setup();
+  setElementFullscreen(window, {});
+  delete window.document.exitFullscreen;
+  let called = 0;
+  window.document.webkitExitFullscreen = () => {
+    called++;
+  };
+  const r = window.__wetubeExitElementFullscreen();
+  check("回退到 webkitExitFullscreen", called === 1 && r === true);
+  setElementFullscreen(window, null);
+}
+
 let failed = 0;
 for (const [name, ok, detail] of checks) {
   console.log(`  ${ok ? "✔" : "✘"} ${name}${ok || !detail ? "" : `  ← ${detail}`}`);

@@ -193,6 +193,14 @@ fn main() -> Result<(), Box<dyn Error>> {
                 // 进入/退出全屏（含 Esc 之类的系统退出路径）都会触发尺寸变化，
                 // 在这里同步 chrome 显隐，保证真正全屏时标题栏/菜单栏一并藏掉。
                 sync_fullscreen_chrome(&window, &webview);
+
+                // 绿色按钮 / Esc 这类系统路径不走 act("fullscreen")。
+                // 窗口一旦不在全屏，元素全屏就必须跟着退——否则会残留一个
+                // 「按 Esc 退出全屏」的浮层。JS 那边没有元素全屏时是空操作，
+                // 所以每次 Resized 都调也没事。
+                if window.fullscreen().is_none() {
+                    eval(&webview, "window.__wetubeExitElementFullscreen?.()");
+                }
             }
             Event::WindowEvent {
                 event: WindowEvent::CloseRequested,
@@ -471,10 +479,20 @@ fn act(webview: &WebView, window: &Window, action: &str) {
             // 切完立刻按「将要进入的状态」同步 chrome 显隐，别等 Resized——
             // tao 在全屏切换时序里不保证 fullscreen() 同步反映新状态。
             //
-            eval(
-                webview,
-                &format!("window.__wetubeSetChromeVisible?.({})", !next_full),
-            );
+            if next_full {
+                eval(webview, &format!("window.__wetubeSetChromeVisible?.({})", !next_full));
+            } else {
+                // 退出时要连浏览器的元素全屏一起退掉，否则播放器还留在全屏里，
+                // WebKit 会弹「按 Esc 退出全屏」的浮层盖住整个页面。
+                eval(
+                    webview,
+                    &format!(
+                        "window.__wetubeSetChromeVisible?.({hidden}); \
+                         window.__wetubeExitElementFullscreen?.();",
+                        hidden = !next_full,
+                    ),
+                );
+            }
         }
         // YouTube 播放器按钮的 HTML5 全屏联动：元素全屏时窗口跟着全屏，
         // 退出时窗口还原。状态由前端在 fullscreenchange 里上报（见 src/ui.js）。

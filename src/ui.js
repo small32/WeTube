@@ -280,4 +280,33 @@
   };
   document.addEventListener("fullscreenchange", syncPlayerFullscreen, true);
   document.addEventListener("webkitfullscreenchange", syncPlayerFullscreen, true);
+
+  /**
+   * 退出浏览器的元素全屏。窗口退出全屏时由 Rust 调用。
+   *
+   * 没有这个会怎样：播放器还留在元素全屏里，WebKit 会弹一个「按 Esc 退出
+   * 全屏」的浮层盖住整个页面，得再点一下或按 Esc 才肯消失——明明已经按了
+   * 退出全屏的快捷键，却退不干净。
+   *
+   * 为什么只做退出、不做进入：
+   *   `exitFullscreen()` 不需要用户激活，从 Rust 侧调没问题；
+   *   `requestFullscreen()` 需要，合成调用会被 WebKit 拒绝。
+   * 所以反方向的「进入」仍然不做，见上面的说明。
+   *
+   * 幂等，没有元素全屏时什么都不做。
+   */
+  window.__wetubeExitElementFullscreen = () => {
+    const el = document.fullscreenElement || document.webkitFullscreenElement;
+    if (!el) return false;
+    const exit = document.exitFullscreen || document.webkitExitFullscreen;
+    if (typeof exit !== "function") return false;
+    try {
+      // 返回 Promise，失败也不用管——窗口那层已经退了，别把异常抛到 Rust 那边
+      const p = exit.call(document);
+      if (p && typeof p.catch === "function") p.catch(() => {});
+    } catch (e) {
+      /* 忽略 */
+    }
+    return true;
+  };
 })();
