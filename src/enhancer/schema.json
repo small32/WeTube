@@ -297,6 +297,23 @@
       ]
     },
     {
+      "id": "hideMastheadWhilePlaying",
+      "label": "播放时隐藏顶栏",
+      "desc": "播放视频时隐藏 YouTube 顶部的搜索导航栏，暂停或鼠标移到顶部时自动显示",
+      "group": "appearance",
+      "pages": [
+        "watch"
+      ],
+      "fields": [
+        {
+          "key": "enabled",
+          "type": "boolean",
+          "default": true,
+          "label": "启用"
+        }
+      ]
+    },
+    {
       "id": "automaticallyShowMoreVideosOnEndScreen",
       "label": "片尾显示更多视频",
       "desc": "视频结尾画面铺满更多推荐视频，而不是只留中间一小块",

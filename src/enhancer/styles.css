@@ -139,6 +139,15 @@ body.yte-hide-end-screen-cards .ytp-ce-hide-button-container {
 	display: none !important;
 }
 
+/* ---------------------------------------------------------------- 播放时隐藏顶栏 */
+/* 用 display:none 而不是压成透明：顶栏是 fixed 覆盖层，留个透明壳子照样会挡住
+ * 鼠标和底下内容的点击。它消失后页面不会上移——#page-manager 的 margin-top 是
+ * WeTube 自己按「顶栏高度 + chrome 高度」写死的（见 src/ui.js）。 */
+body.yte-hide-masthead-playing ytd-masthead,
+body.yte-hide-masthead-playing #masthead-container {
+	display: none !important;
+}
+
 /* ---------------------------------------------------------------- 隐藏滚动条 */
 body.yte-hide-scroll-bar::-webkit-scrollbar,
 body.yte-hide-scroll-bar ::-webkit-scrollbar {

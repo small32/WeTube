@@ -11,7 +11,18 @@
 	const YTE = window.__YTE;
 	if (!YTE) return;
 
-	const { cfg, on, off, waitForElement, getPlayer, videoData, toggleBodyClass, setStyle, log } = YTE;
+	const {
+		cfg,
+		on,
+		off,
+		waitForElement,
+		waitForPlayer,
+		getPlayer,
+		videoData,
+		toggleBodyClass,
+		setStyle,
+		log,
+	} = YTE;
 	const F = YTE.features;
 
 	const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
@@ -176,6 +187,113 @@
 			toggleBodyClass("yte-hide-live-stream-chat", Boolean(data?.isLive) || location.pathname.startsWith("/live/"));
 		},
 		disable: () => toggleBodyClass("yte-hide-live-stream-chat", false),
+	};
+
+	// 播放时隐藏 YouTube 顶栏（搜索框那一排）
+	//
+	// 只在视频真的在播的时候收起，暂停、鼠标移到顶部一栏、或者按「/」想搜索时
+	// 立刻放出来。判「在播」直接用 <video> 自己的 paused，不去碰播放器内部 API：
+	// 改版不易失效，而且缓冲期间 paused 仍是 false，不会来回闪。
+	//
+	// media 事件不冒泡，所以在 document 上用捕获阶段接，YouTube 换掉 video 元素
+	// 也不用重新挂监听。
+	const MASTHEAD_CLASS = "yte-hide-masthead-playing";
+	const MASTHEAD_OWNER = "hideMastheadWhilePlaying";
+
+	let mastheadPointerNear = false;
+	let mastheadFocusInside = false;
+	let mastheadRevealTimer = null;
+	// 顶部感应区的下边界：chrome(36) + 顶栏(56) + 一点富余。顶栏藏起来后量不到
+	// 高度，所以只在它可见时更新，藏起来期间沿用上次的值。
+	let mastheadRevealLimit = 100;
+
+	const mastheadEl = () => document.querySelector("ytd-masthead, #masthead-container");
+
+	function videoPlaying() {
+		const video = getPlayer()?.querySelector("video");
+		return Boolean(video && !video.paused && !video.ended);
+	}
+
+	function syncMasthead() {
+		const bar = mastheadEl();
+		const rect = bar?.getBoundingClientRect();
+		if (rect?.height) mastheadRevealLimit = rect.bottom + 8;
+
+		const hidden = videoPlaying() && !mastheadPointerNear && !mastheadFocusInside && !mastheadRevealTimer;
+		toggleBodyClass(MASTHEAD_CLASS, hidden);
+	}
+
+	/** 临时放出来（按了「/」之类的），几秒后自己收回去。 */
+	function revealMastheadTemporarily(ms = 3000) {
+		clearTimeout(mastheadRevealTimer);
+		mastheadRevealTimer = setTimeout(() => {
+			mastheadRevealTimer = null;
+			syncMasthead();
+		}, ms);
+		syncMasthead();
+	}
+
+	function onMastheadPointerMove(event) {
+		const near = event.clientY <= mastheadRevealLimit;
+		if (near === mastheadPointerNear) return;
+		mastheadPointerNear = near;
+		syncMasthead();
+	}
+
+	function onMastheadPointerLeave() {
+		if (!mastheadPointerNear) return;
+		mastheadPointerNear = false;
+		syncMasthead();
+	}
+
+	function onMastheadFocusIn(event) {
+		const bar = mastheadEl();
+		const path = event.composedPath?.() ?? [];
+		mastheadFocusInside = Boolean(bar && path.includes(bar));
+		syncMasthead();
+	}
+
+	function onMastheadFocusOut() {
+		mastheadFocusInside = false;
+		syncMasthead();
+	}
+
+	function onMastheadKeyDown(event) {
+		// 顶栏藏起来时 display:none 的搜索框没法聚焦，「/」就成死键了——先放出来。
+		if (event.key !== "/" || event.metaKey || event.ctrlKey || event.altKey) return;
+		const target = event.target;
+		const tag = target?.tagName?.toLowerCase();
+		if (tag === "input" || tag === "textarea" || target?.isContentEditable) return;
+		revealMastheadTemporarily();
+	}
+
+	function attachMastheadHooks() {
+		// 捕获阶段才能在 document 上收到不冒泡的 media 事件
+		for (const type of ["play", "playing", "pause", "ended", "emptied", "loadedmetadata"]) {
+			on(document, type, syncMasthead, MASTHEAD_OWNER, true);
+		}
+		on(document, "mousemove", onMastheadPointerMove, MASTHEAD_OWNER);
+		on(document, "mouseleave", onMastheadPointerLeave, MASTHEAD_OWNER);
+		on(document, "focusin", onMastheadFocusIn, MASTHEAD_OWNER, true);
+		on(document, "focusout", onMastheadFocusOut, MASTHEAD_OWNER, true);
+		on(document, "keydown", onMastheadKeyDown, MASTHEAD_OWNER, true);
+	}
+
+	F.hideMastheadWhilePlaying = {
+		enable: async () => {
+			attachMastheadHooks();
+			syncMasthead();
+			// 首屏播放器可能还没就绪，等它一下再校一次（比如半路打开这个开关）
+			await waitForPlayer(5000);
+			syncMasthead();
+		},
+		disable: () => {
+			clearTimeout(mastheadRevealTimer);
+			mastheadRevealTimer = null;
+			mastheadPointerNear = false;
+			mastheadFocusInside = false;
+			toggleBodyClass(MASTHEAD_CLASS, false);
+		},
 	};
 
 	// 片尾铺满推荐视频

@@ -27,7 +27,7 @@ WeTube 是一个用 Rust 写的 YouTube 桌面端App：一个装 youtube.com 的
 
 点工具栏最右边的齿轮（或按 `Cmd/Ctrl + ,`）打开设置面板：
 
-- **135 个可调节项全部自动生成**，加一项只需要改 `src/enhancer/schema.json` 一处
+- **136 个可调节项全部自动生成**，加一项只需要改 `src/enhancer/schema.json` 一处
 - 按内容过滤 / 播放器 / 按钮 / Shorts / 播放列表 / 外观 / 高级分成 7 组，支持搜索
 - 改动即时生效，自动存盘
 
@@ -38,7 +38,7 @@ WeTube 是一个用 Rust 写的 YouTube 桌面端App：一个装 youtube.com 的
 | macOS   | `~/Library/Application Support/WeTube/settings.json` |
 | Windows | `%APPDATA%\WeTube\settings.json`                 |
 
-**进度**：59 个功能条目里已实现 40 个。剩下 19 个主要是播放器按钮类——它们依赖原扩展的
+**进度**：60 个功能条目里已实现 41 个。剩下 19 个主要是播放器按钮类——它们依赖原扩展的
 `buttonController`（一个 36KB 的按钮注入系统，含控制栏插槽、功能菜单、全屏重定位），
 需要单独移植，见下方「尚未实现」。设置面板里未实现的功能会灰显并标注。
 

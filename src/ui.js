@@ -82,6 +82,10 @@
   let lastAutoClick = 0; // 上次自动点击展开按钮的时间戳（冷却用，防侧栏闪烁）
 
   function syncWideGuide() {
+    // 播放页不自动展开侧栏：进 watch 时那一下自动点击会把侧栏撑开又收回去，
+    // 看起来像「弹出来一下」。播放页保留 YouTube 自己的状态即可。
+    if (location.pathname.startsWith("/watch")) return;
+
     const wide = window.innerWidth >= WIDE_GUIDE_BREAKPOINT;
     if (!wide) {
       wasWide = false;
@@ -216,19 +220,36 @@
   });
   applyShift(isYouTube());
 
-  // 显隐整个自定义 chrome（菜单按钮 + 工具栏 + 窗口控制）
+  // 显隐整个自定义 chrome（菜单按钮 + 工具栏 + 窗口控制）。
+  // 全屏播放时由 Rust 侧驱动（见 main.rs 的 sync_fullscreen_chrome），
+  // 让出整块屏幕给视频，退出全屏再恢复。
+  window.__wetubeSetChromeVisible = (visible) => {
+    if (!HAS_CHROME) return;
+    const bar = document.getElementById("wetube-chrome");
+    if (!bar) return;
+    const hidden = bar.style.display === "none";
+    const wantHidden = !visible;
+    if (hidden === wantHidden) return;
+    bar.style.display = wantHidden ? "none" : "";
+    applyShift(visible && isYouTube());
+  };
+
   window.__wetubeToggleChrome = () => {
     if (!HAS_CHROME) return false;
     const bar = document.getElementById("wetube-chrome");
     if (!bar) return false;
-    const hidden = bar.style.display === "none";
-    bar.style.display = hidden ? "" : "none";
-    // 重设下移偏移
-    document.documentElement.style.setProperty(
-      "--wetube-bar-height",
-      hidden ? BAR_HEIGHT + "px" : "0px"
-    );
-    applyShift(hidden && isYouTube());
-    return hidden;
+    window.__wetubeSetChromeVisible(bar.style.display !== "none" ? false : true);
+    return bar.style.display !== "none";
   };
+
+  // YouTube 播放器按钮走的是 HTML5 元素全屏（document.fullscreenElement），
+  // 那只是把视频撑满 webview；App 窗口本身没动。这里把两者联动起来：
+  // 点播放器全屏 → 窗口一并全屏（chrome 由 Rust 侧藏掉），退出全屏 → 窗口还原。
+  // F11 走的是 tao 窗口全屏，不产生 fullscreenchange，两套逻辑互不干扰。
+  const syncPlayerFullscreen = () => {
+    const fsEl = document.fullscreenElement || document.webkitFullscreenElement;
+    send(fsEl ? "player-fullscreen:on" : "player-fullscreen:off");
+  };
+  document.addEventListener("fullscreenchange", syncPlayerFullscreen, true);
+  document.addEventListener("webkitfullscreenchange", syncPlayerFullscreen, true);
 })();
