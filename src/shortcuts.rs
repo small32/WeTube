@@ -296,7 +296,9 @@ mod tests {
             "Mod+ArrowLeft",
             "F11",
             "Mod+Comma",
-            "Ctrl+Alt+Delete",
+            // 注意：本模块在 Windows 上把 Ctrl 规范成 Mod（见 primary_uses_super_not_meta），
+            // 所以这里用规范写法，避免测试在 Windows 上把 Mod+Alt+Delete 误判成不 round-trip。
+            "Mod+Alt+Delete",
         ] {
             let accel = parse(spec).unwrap_or_else(|| panic!("{spec} 要能解析"));
             assert_eq!(encode(&accel), spec, "{spec} 编码后应还原");
