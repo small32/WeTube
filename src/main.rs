@@ -150,6 +150,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     // tao 的 Window 没有直接 close()，我们只能让 control_flow = Exit。
     let window_close_pending = AtomicBool::new(false);
 
+    // 上一次的窗口全屏状态。Esc / 绿色按钮这类系统退出路径不会走 act("fullscreen")，
+    // 只在 Resized 里能察觉到，靠这个把播放器一起带出去。
+    let mut was_fullscreen = false;
+
     let ipc_proxy = event_loop.create_proxy();
     let webview = WebViewBuilder::new()
         .with_url(HOME_URL)
@@ -190,6 +194,17 @@ fn main() -> Result<(), Box<dyn Error>> {
                 // 进入/退出全屏（含 Esc 之类的系统退出路径）都会触发尺寸变化，
                 // 在这里同步 chrome 显隐，保证真正全屏时标题栏/菜单栏一并藏掉。
                 sync_fullscreen_chrome(&window, &webview);
+
+                // 全屏状态真的变了才碰播放器——拖窗口同样会触发 Resized，
+                // 不加这个判断会把正在全屏播放的视频一次次踢回小窗。
+                let full = window.fullscreen().is_some();
+                if full != was_fullscreen {
+                    was_fullscreen = full;
+                    eval(
+                        &webview,
+                        &format!("window.__wetubeSyncPlayerFullscreen?.({full})"),
+                    );
+                }
             }
             Event::WindowEvent {
                 event: WindowEvent::CloseRequested,
@@ -404,9 +419,17 @@ fn act(webview: &WebView, window: &Window, action: &str) {
             });
             // 切完立刻按「将要进入的状态」同步 chrome 显隐，别等 Resized——
             // tao 在全屏切换时序里不保证 fullscreen() 同步反映新状态。
+            //
+            // 播放页上还要让播放器跟着一起进/退全屏，否则窗口铺满了但视频
+            // 还是嵌在页面里的小窗。两条合并成一次 eval，保证执行顺序。
             eval(
                 webview,
-                &format!("window.__wetubeSetChromeVisible?.({})", !next_full),
+                &format!(
+                    "window.__wetubeSetChromeVisible?.({hidden}); \
+                     window.__wetubeSyncPlayerFullscreen?.({next_full});",
+                    hidden = !next_full,
+                    next_full = next_full,
+                ),
             );
         }
         // YouTube 播放器按钮的 HTML5 全屏联动：元素全屏时窗口跟着全屏，

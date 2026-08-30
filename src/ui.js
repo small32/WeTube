@@ -268,4 +268,22 @@
   };
   document.addEventListener("fullscreenchange", syncPlayerFullscreen, true);
   document.addEventListener("webkitfullscreenchange", syncPlayerFullscreen, true);
+
+  /**
+   * 把播放器的全屏状态对齐到窗口全屏（菜单 / F11 / 自定义快捷键走这里）。
+   *
+   * 只点 YouTube 自己的全屏按钮，不用 `video.requestFullscreen()`——后者只把
+   * 视频元素撑满，绕过了 YouTube 那套（控制栏、双击退出、Esc 退出都还在）。
+   * 不在播放页时（首页、订阅页）按钮不存在，直接返回 false，什么也不做。
+   *
+   * 点了按钮会触发 fullscreenchange，那边再把状态回报给 Rust。不会来回打架：
+   * 上报那条分支只调 set_fullscreen，不会再反过来点按钮。
+   */
+  window.__wetubeSyncPlayerFullscreen = (wantFull) => {
+    const btn = document.querySelector(".ytp-fullscreen-button");
+    if (!btn) return false;
+    const isFull = Boolean(document.fullscreenElement || document.webkitFullscreenElement);
+    if (isFull !== Boolean(wantFull)) btn.click();
+    return true;
+  };
 })();
