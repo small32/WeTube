@@ -154,53 +154,69 @@
   window.addEventListener("yt-navigate-finish", () => applyShift(isYouTube()));
   window.addEventListener("popstate", () => applyShift(isYouTube()));
 
-  /* 键盘快捷键：webview 会先吃掉绝大多数按键，窗口级快捷键只能在页面内拦。 */
+  const isMac = window.__WETUBE_PLATFORM__ === "macos";
+
+  /**
+   * 一次按键 → 快捷键 spec 字符串。
+   *
+   * `ev.code` 恰好等于 Rust 侧 `Code` 的 Debug 名（`KeyR` / `ArrowLeft` / `F11`），
+   * 直接拼就行，两边不用各维护一套键名映射。
+   *
+   * 挂到 window 上是给快捷键设置面板复用的——它在 ui.js 之后注入。
+   */
+  function eventToSpec(ev) {
+    const parts = [];
+    if (isMac) {
+      // 顺序必须跟 Rust 侧 shortcuts.rs 的 encode() 一致：Mod, Ctrl, Alt, Shift。
+      // 否则面板拿 spec 做字符串比对时会漏判冲突（"Mod+Shift+x" ≠ "Shift+Mod+x"）。
+      if (ev.metaKey) parts.push("Mod");
+      if (ev.ctrlKey) parts.push("Ctrl");
+    } else {
+      if (ev.ctrlKey) parts.push("Mod");
+      if (ev.metaKey) parts.push("Meta"); // Windows 键，Rust 侧不认
+    }
+    if (ev.altKey) parts.push("Alt");
+    if (ev.shiftKey) parts.push("Shift");
+    parts.push(ev.code);
+    return parts.join("+");
+  }
+  window.__wetubeEventToSpec = eventToSpec;
+
+  /** spec → 命令 id。快捷键被改过之后要重算。 */
+  let keyMap = new Map();
+  function rebuildKeyMap() {
+    keyMap = new Map();
+    for (const item of window.__WETUBE_SHORTCUTS__ || []) {
+      keyMap.set(item.spec, item.id);
+    }
+  }
+  rebuildKeyMap();
+  window.addEventListener("wetube:shortcuts-changed", rebuildKeyMap);
+
+  /* 键盘快捷键：webview 会先吃掉绝大多数按键，窗口级快捷键只能在页面内拦。
+   *
+   * 以前这里是一长串 `ev.key === "r"` 之类的硬编码，改成拿本次按键的 spec 去
+   * 注册表反查——用户改了快捷键这里立刻跟着变。
+   */
   window.addEventListener(
     "keydown",
     (ev) => {
-      const mod = ev.metaKey || ev.ctrlKey;
-      if (!mod && ev.key !== "F5" && ev.key !== "F11") return;
+      // 快捷键设置面板正在等用户按键，这次别当成功能键发出去。
+      // 这个监听是捕获阶段注册的、比面板早，只能靠标志位让开。
+      if (window.__wetubeCapturingShortcut) return;
 
-      if (mod && !ev.shiftKey && !ev.altKey && (ev.key === "r" || ev.key === "R")) {
-        ev.preventDefault();
-        send("reload");
-        return;
-      }
-      if (ev.key === "F5") {
-        ev.preventDefault();
-        send("reload");
-        return;
-      }
-      if (mod && ev.key === "ArrowLeft" || ev.altKey && ev.key === "ArrowLeft") {
-        ev.preventDefault();
-        send("back");
-        return;
-      }
-      if (mod && ev.key === "ArrowRight" || ev.altKey && ev.key === "ArrowRight") {
-        ev.preventDefault();
-        send("forward");
-        return;
-      }
-      if (mod && ev.shiftKey && (ev.key === "h" || ev.key === "H")) {
-        ev.preventDefault();
-        send("home");
-        return;
-      }
-      if (mod && ev.shiftKey && (ev.key === "o" || ev.key === "O")) {
-        ev.preventDefault();
-        send("open-external");
-        return;
-      }
-      if (ev.key === "F11") {
-        ev.preventDefault();
-        send("fullscreen");
-        return;
-      }
-      if (mod && ev.key === ",") {
-        ev.preventDefault();
-        send("settings");
-        return;
-      }
+      const spec = eventToSpec(ev);
+      let id = keyMap.get(spec);
+
+      // 浏览器惯例的别名：F5 刷新、Alt+←/→ 前进后退。
+      // 注册表里显式配置过的优先——用户真把 F5 派给别的用途，这里就让位。
+      if (!id && ev.code === "F5" && !keyMap.has("F5")) id = "reload";
+      if (!id && ev.altKey && ev.code === "ArrowLeft" && !keyMap.has("Alt+ArrowLeft")) id = "back";
+      if (!id && ev.altKey && ev.code === "ArrowRight" && !keyMap.has("Alt+ArrowRight")) id = "forward";
+
+      if (!id) return;
+      ev.preventDefault();
+      send(id);
     },
     true
   );

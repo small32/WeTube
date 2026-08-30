@@ -101,13 +101,21 @@
     return svg;
   }
 
-  /* 菜单结构定义：label + items[]。点击项发 IPC；空对象 {} 表示分隔线。 */
+  /* 菜单项只声明 id 和 label，快捷键的显示文字到弹层生成时才去注册表取
+   * （见 shortcutOf）——用户改完快捷键，下次点开菜单就是新的，不用重建菜单条。 */
+  function shortcutOf(id) {
+    const list = window.__WETUBE_SHORTCUTS__ || [];
+    const hit = list.find((it) => it.id === id);
+    return hit ? hit.display : "";
+  }
+
+  /* 菜单结构定义：label + items[]。点击项发 IPC；{ sep: true } 表示分隔线。 */
   const MENUS = [
     {
       label: "文件",
       items: [
-        { id: "home", label: "回到首页", shortcut: "Ctrl+Shift+H" },
-        { id: "open-external", label: "在系统浏览器中打开", shortcut: "Ctrl+Shift+O" },
+        { id: "home", label: "回到首页" },
+        { id: "open-external", label: "在系统浏览器中打开" },
         { sep: true },
         { id: "window-close", label: "退出" },
       ],
@@ -115,9 +123,9 @@
     {
       label: "导航",
       items: [
-        { id: "back", label: "后退", shortcut: "Alt+←" },
-        { id: "forward", label: "前进", shortcut: "Alt+→" },
-        { id: "reload", label: "刷新", shortcut: "Ctrl+R" },
+        { id: "back", label: "后退" },
+        { id: "forward", label: "前进" },
+        { id: "reload", label: "刷新" },
         { sep: true },
         { id: "home", label: "主页" },
       ],
@@ -125,14 +133,15 @@
     {
       label: "视图",
       items: [
-        { id: "settings", label: "增强设置…", shortcut: "Ctrl+," },
+        { id: "shortcuts", label: "快捷键设置…" },
+        { id: "settings", label: "增强设置…" },
         { sep: true },
-        { id: "fullscreen", label: "切换全屏", shortcut: "F11" },
+        { id: "fullscreen", label: "切换全屏" },
       ],
     },
     {
       label: "帮助",
-      items: [{ id: "project", label: "项目主页", shortcut: "" }],
+      items: [{ id: "project", label: "项目主页" }],
     },
   ];
 
@@ -503,11 +512,13 @@
         const label = document.createElement("span");
         label.textContent = it.label;
         item.appendChild(label);
-        if (it.shortcut) {
-          const accel = document.createElement("span");
-          accel.className = "accel";
-          accel.textContent = it.shortcut;
-          item.appendChild(accel);
+        // 现在才查注册表，改完快捷键立刻反映到菜单上
+        const accel = shortcutOf(it.id);
+        if (accel) {
+          const accelNode = document.createElement("span");
+          accelNode.className = "accel";
+          accelNode.textContent = accel;
+          item.appendChild(accelNode);
         }
         pop.appendChild(item);
       });

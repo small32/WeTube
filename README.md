@@ -51,6 +51,7 @@ WeTube 是一个用 Rust 写的 YouTube 桌面端App：一个装 youtube.com 的
   - 没有菜单栏的 macOS 应用是没法用 `Cmd+Q`、`Cmd+C/V` 的，所以这一块是必需的
 - **键盘快捷键**：`Cmd/Ctrl + R` 或 `F5` 刷新、`Cmd/Ctrl + ←/→` 或 `Alt + ←/→` 前进后退、
   `Cmd/Ctrl + Shift + H` 回首页、`F11` 全屏
+  - 除 `F5` / `Alt + ←/→` 这几个浏览器惯例别名外，全部可以自己改，见下方「快捷键设置」
 - **外链不乱跑**：`target="_blank"` 和 `window.open` 一律交给系统默认浏览器，
   不会把整个壳子带走到别的网站
 - **窗口标题跟着视频走**：显示成「视频标题 — WeTube」
@@ -104,14 +105,39 @@ python scripts/make-icons.py
 要分发给别人的话，把 ad-hoc 签名换成 Developer ID 并做公证，否则对方会看到
 「无法检查是否包含恶意软件」的提示。
 
+## 快捷键设置
+
+「视图」菜单里「增强设置…」上方那项（默认 `Cmd/Ctrl + Shift + K`），打开后可以
+自己改导航和视图两个菜单里的快捷键：
+
+| 菜单 | 能改的项 |
+| ---- | -------- |
+| 导航 | 后退 / 前进 / 刷新 / 回到首页 / 在系统浏览器中打开 |
+| 视图 | 快捷键设置 / 增强设置 / 切换全屏 |
+
+点「更改」后直接按下新组合即可，`Esc` 取消。主键必须带 `Cmd` / `Ctrl` / `Alt` /
+`Shift` 中的至少一个（`F1`–`F12` 除外），否则在 YouTube 里打个字都会触发功能。
+跟已有快捷键撞了会提示，但仍然按你的设置保存。
+
+**「编辑」和「窗口」菜单改不了**，这是 muda 的限制：那些是 `PredefinedMenuItem`，
+muda 没给它 `set_accelerator`。它们走的是系统 responder 链——焦点在哪个输入框，
+`Cmd+V` 就作用在哪个输入框，自己实现反而会弄坏粘贴
+（浏览器里 `document.execCommand('paste')` 是被禁的）。
+
+自定义值存在 `settings.json` 的 `shortcuts` 里，`spec` 格式是 `Mod+Shift+KeyH`：
+`Mod` 是平台主键（macOS 的 Command / Windows 的 Control），主键用 `Code` 的
+Debug 名，跟 JS 的 `KeyboardEvent.code` 一致。
+
 ## 项目结构
 
 ```
 src/main.rs              窗口、webview、菜单、IPC、配置落盘
 src/config.rs            读 schema → 默认值 + 用户覆盖 → 持久化（含单元测试）
+src/shortcuts.rs         可自定义快捷键的注册表 + spec 解析/序列化（含单元测试）
 src/titlebar.js          自定义窗口 chrome（工具栏 + 菜单条 + 窗口控制）
                          注：macOS 上不渲染，见上文「构建」
-src/ui.js                YouTube 内容下推避让 + 页面内快捷键
+src/ui.js                YouTube 内容下推避让 + 页面内快捷键分发（按注册表）
+src/shortcut-panel.js    快捷键设置面板
 src/enhancer/
   schema.json            135 个配置项的单一数据源（Rust 与 JS 共用）
   runtime.js             配置读写、事件命名空间、元素等待、播放器封装、SPA 重放
@@ -125,6 +151,7 @@ scripts/
   build-macos-app.sh     macOS 构建并打包成 .app
   make-icons.py          从源 ico 生成 app.ico 与 AppIcon.iconset
   verify-platform-ui.js  三平台 UI 差异校验（jsdom，改完前端跑一遍）
+  verify-shortcuts.js    快捷键面板功能验证（jsdom，20 项断言）
 icons/
   source.ico             源图标
   app.ico                Windows 嵌入用

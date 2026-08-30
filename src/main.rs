@@ -12,6 +12,7 @@
 // 需要看调试日志时，把 eprintln 输出重定向到文件即可。
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
+use std::collections::HashMap;
 use std::error::Error;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -32,6 +33,7 @@ use wry::{
 use muda::MenuEvent;
 
 mod config;
+mod shortcuts;
 use config::ConfigStore;
 
 const APP_NAME: &str = "WeTube";
@@ -64,6 +66,7 @@ const TITLEBAR_JS: &str = include_str!("titlebar.js");
 const ENHANCER_JS: &str = include_str!(concat!(env!("OUT_DIR"), "/enhancer-bundle.js"));
 /// 功能 CSS 与深黑主题，由 build.rs 转成 JS 字符串常量。
 const ENHANCER_ASSETS_JS: &str = include_str!(concat!(env!("OUT_DIR"), "/enhancer-assets.js"));
+const SHORTCUT_PANEL_JS: &str = include_str!("shortcut-panel.js");
 /// 32 套 DeepDark 配色预设。
 const DEEPDARK_PRESETS_JS: &str = include_str!("enhancer/deepdark-presets.js");
 
@@ -125,9 +128,16 @@ fn main() -> Result<(), Box<dyn Error>> {
     // macOS 才有原生菜单栏的需求——HTML chrome 上的菜单项直接发 IPC 字符串，
     // 走这里一样能 dispatch。
     #[cfg(target_os = "macos")]
-    let menu = build_menu()?;
+    let (menu, built_items) = build_menu(&store)?;
     #[cfg(target_os = "macos")]
     install_menu(&menu, &window)?;
+
+    // 只有 macOS 有原生菜单栏要跟着更新；Windows 的菜单是 HTML 画的，
+    // 改完靠前端自己重绘。统一成 Option，省得到处写 cfg。
+    #[cfg(target_os = "macos")]
+    let menu_items = Some(built_items);
+    #[cfg(not(target_os = "macos"))]
+    let menu_items: Option<MenuItemMap> = None;
 
     #[cfg(target_os = "macos")]
     let menu_proxy = event_loop.create_proxy();
@@ -200,7 +210,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                     return;
                 }
                 match serde_json::from_str::<Value>(&msg) {
-                    Ok(Value::Object(payload)) => handle_panel_message(&mut store, &webview, &payload),
+                    Ok(Value::Object(payload)) => {
+                        handle_panel_message(&mut store, &webview, menu_items.as_ref(), &payload)
+                    }
                     _ => act(&webview, &window, &msg),
                 }
             }
@@ -212,6 +224,8 @@ Event::UserEvent(Command::Menu(id)) => {
                     if let Err(err) = open::that(PROJECT_URL) {
                         log_err(&format!("打开项目主页失败: {err}"));
                     }
+                } else if id == "shortcuts" {
+                    eval(&webview, "window.__wetubeToggleShortcutPanel?.()");
                 } else if id == "settings" {
                     eval(&webview, "window.__YTE?.togglePanel?.()");
                 } else {
@@ -229,7 +243,15 @@ Event::UserEvent(Command::Menu(id)) => {
 }
 
 /// 处理设置面板发来的配置变更：落盘 + 让页面重新应用。
-fn handle_panel_message(store: &mut ConfigStore, webview: &WebView, payload: &serde_json::Map<String, Value>) {
+///
+/// `menu_items` 是 macOS 原生菜单栏里那几个可自定义项的引用；Windows 没有
+/// 原生菜单栏，传 `None`，改完由前端自己重绘 HTML 菜单。
+fn handle_panel_message(
+    store: &mut ConfigStore,
+    webview: &WebView,
+    menu_items: Option<&MenuItemMap>,
+    payload: &serde_json::Map<String, Value>,
+) {
     match payload.get("type").and_then(Value::as_str) {
         Some("config:set") => {
             let (Some(feature), Some(key)) = (
@@ -253,8 +275,102 @@ fn handle_panel_message(store: &mut ConfigStore, webview: &WebView, payload: &se
             );
             eval(webview, &script);
         }
+        Some("shortcut:set") => {
+            let (Some(id), Some(spec)) = (
+                payload.get("id").and_then(Value::as_str),
+                payload.get("spec").and_then(Value::as_str),
+            ) else {
+                return;
+            };
+            apply_shortcut(store, webview, menu_items, id, Some(spec));
+        }
+        Some("shortcut:reset") => {
+            // 带 id 只恢复一项，不带就全部恢复默认
+            match payload.get("id").and_then(Value::as_str) {
+                Some(id) => apply_shortcut(store, webview, menu_items, id, None),
+                None => reset_all_shortcuts(store, webview, menu_items),
+            }
+        }
         _ => {}
     }
+}
+
+/// 改（或清空）一项快捷键：落盘 → 更新菜单项 → 让页面重绘。
+fn apply_shortcut(
+    store: &mut ConfigStore,
+    webview: &WebView,
+    menu_items: Option<&MenuItemMap>,
+    id: &str,
+    spec: Option<&str>,
+) {
+    // 前端已经挡过一道，这里再挡一道：配置文件是能被手改的。
+    let spec = match spec {
+        Some(raw) => {
+            if !shortcuts::is_valid(raw) {
+                log_err(&format!("忽略非法快捷键({id}): {raw}"));
+                return;
+            }
+            // 归一化成规范写法，冲突比对和"是否改过默认值"才准
+            shortcuts::normalize(raw)
+        }
+        None => None,
+    };
+
+    if let Err(err) = store.set_shortcut(id, spec.as_deref()) {
+        log_err(&format!("保存快捷键失败: {err}"));
+        return;
+    }
+    sync_shortcuts(store, webview, menu_items, Some(id));
+}
+
+/// 全部快捷键恢复默认。
+fn reset_all_shortcuts(
+    store: &mut ConfigStore,
+    webview: &WebView,
+    menu_items: Option<&MenuItemMap>,
+) {
+    if let Err(err) = store.reset_shortcuts() {
+        log_err(&format!("重置快捷键失败: {err}"));
+        return;
+    }
+    sync_shortcuts(store, webview, menu_items, None);
+}
+
+/// 把注册表里的最新值推给菜单和页面。
+///
+/// `only` 传 `Some(id)` 只同步一项，`None` 表示全部（重置时用）。
+/// 菜单项用的是 `Rc` 克隆体，对它调 `set_accelerator` 就是改菜单栏上那个。
+fn sync_shortcuts(
+    store: &ConfigStore,
+    webview: &WebView,
+    menu_items: Option<&MenuItemMap>,
+    only: Option<&str>,
+) {
+    if let Some(items) = menu_items {
+        for def in shortcuts::SHORTCUTS {
+            if let Some(id) = only {
+                if def.id != id {
+                    continue;
+                }
+            }
+            let Some(item) = items.get(def.id) else {
+                continue;
+            };
+            let accel = shortcuts::resolve(def.id, store.shortcut(def.id));
+            if let Err(err) = item.set_accelerator(accel) {
+                log_err(&format!("更新菜单快捷键失败({}): {err}", def.id));
+            }
+        }
+    }
+
+    // 面板和 Windows 的 HTML 菜单都从这份注册表渲染，整体推一次最省心。
+    eval(
+        webview,
+        &format!(
+            "window.__wetubeOnShortcutsChanged?.({});",
+            shortcuts::registry_json(store.shortcuts())
+        ),
+    );
 }
 
 /// 跟随窗口全屏状态切换 HTML chrome 的显隐：全屏时整个藏掉，给视频让出屏幕。
@@ -277,6 +393,8 @@ fn act(webview: &WebView, window: &Window, action: &str) {
         }
         "open-external" => eval(webview, "window.ipc.postMessage('open:'+location.href)"),
         "settings" => eval(webview, "window.__YTE?.togglePanel?.()"),
+        // 菜单事件走 menu 分支，键盘快捷键走这里，两边都能开。
+        "shortcuts" => eval(webview, "window.__wetubeToggleShortcutPanel?.()"),
         "fullscreen" => {
             let next_full = window.fullscreen().is_none();
             window.set_fullscreen(if next_full {
@@ -346,19 +464,23 @@ fn init_script(store: &ConfigStore) -> String {
         "window.__YTE_SCHEMA__ = {schema};\n\
          window.__YTE_CONFIG__ = {config};\n\
          window.__WETUBE_PLATFORM__ = \"{platform}\";\n\
+         window.__WETUBE_SHORTCUTS__ = {shortcuts};\n\
          {presets}\n\
          {assets}\n\
          {titlebar}\n\
          {toolbar}\n\
-         {enhancer}\n",
+         {enhancer}\n\
+         {shortcut_panel}\n",
         schema = js_literal(store.schema()),
         config = js_literal(&store.full_config().to_string()),
         platform = PLATFORM,
+        shortcuts = shortcuts::registry_json(store.shortcuts()),
         presets = DEEPDARK_PRESETS_JS,
         assets = ENHANCER_ASSETS_JS,
         titlebar = TITLEBAR_JS,
         toolbar = TOOLBAR_JS,
         enhancer = ENHANCER_JS,
+        shortcut_panel = SHORTCUT_PANEL_JS,
     )
 }
 
@@ -372,44 +494,66 @@ fn js_literal(json: &str) -> String {
 // ---------------------------------------------------------------- 菜单
 
 use muda::{
-    accelerator::{Accelerator, Code, Modifiers},
+    accelerator::Accelerator,
     Menu, MenuItem, PredefinedMenuItem, Submenu,
 };
+// Code / Modifiers 现在只有 Windows 菜单里的 Alt+F4 还在用，macOS 下那条分支
+// 整个被 cfg 掉了。属性不能挂在嵌套的 use 项上，所以单独拆一条出来。
+#[cfg_attr(target_os = "macos", allow(unused_imports))]
+use muda::accelerator::{Code, Modifiers};
 #[cfg(target_os = "macos")]
 use muda::AboutMetadata;
 
-/// 主快捷键：macOS 用 Command，Windows / Linux 用 Control。
-#[cfg(target_os = "macos")]
-const PRIMARY: Modifiers = Modifiers::SUPER;
-#[cfg(not(target_os = "macos"))]
-const PRIMARY: Modifiers = Modifiers::CONTROL;
+/// 取某项快捷键当前生效的 `Accelerator`。
+///
+/// 用户改过就用改过的，没改过用注册表里的默认值；注册表里查不到返回 `None`，
+/// 菜单项就没有快捷键。
+fn accel_for(store: &ConfigStore, id: &str) -> Option<Accelerator> {
+    shortcuts::resolve(id, store.shortcut(id))
+}
 
-fn accel(key: Code, extra: Modifiers) -> Option<Accelerator> {
-    Some(Accelerator::new(Some(PRIMARY | extra), key))
+/// 建好的菜单里，可自定义快捷键那几项的引用。
+///
+/// `MenuItem` 内部是 `Rc<RefCell<MenuChild>>`，克隆体和原对象是同一个底层菜单项。
+/// 所以改快捷键时直接对这里存的引用调 `set_accelerator` 就能就地生效，
+/// 不必重建整棵菜单——也就不用操心新 Menu 的存活期。
+type MenuItemMap = HashMap<String, MenuItem>;
+
+/// 把建好的菜单项登记进 `items`，顺手把所有权交回给调用方（菜单里用的是它的引用）。
+fn track(items: &mut MenuItemMap, id: &str, item: &MenuItem) {
+    items.insert(id.to_string(), item.clone());
 }
 
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn build_menu() -> Result<Menu, Box<dyn Error>> {
+fn build_menu(store: &ConfigStore) -> Result<(Menu, MenuItemMap), Box<dyn Error>> {
+    let mut items = MenuItemMap::new();
+
+    let nav_back = MenuItem::with_id("back", "后退", true, accel_for(store, "back"));
+    let nav_forward = MenuItem::with_id("forward", "前进", true, accel_for(store, "forward"));
+    let nav_reload = MenuItem::with_id("reload", "刷新", true, accel_for(store, "reload"));
+    let nav_home = MenuItem::with_id("home", "回到首页", true, accel_for(store, "home"));
+    let nav_open = MenuItem::with_id(
+        "open-external",
+        "在系统浏览器中打开",
+        true,
+        accel_for(store, "open-external"),
+    );
+
+    let view_shortcuts =
+        MenuItem::with_id("shortcuts", "快捷键设置…", true, accel_for(store, "shortcuts"));
+    let view_settings = MenuItem::with_id("settings", "增强设置…", true, accel_for(store, "settings"));
+    let view_fullscreen =
+        MenuItem::with_id("fullscreen", "切换全屏", true, accel_for(store, "fullscreen"));
     let nav = Submenu::with_items(
         "导航",
         true,
         &[
-            &MenuItem::with_id("back", "后退", true, accel(Code::ArrowLeft, Modifiers::empty())),
-            &MenuItem::with_id(
-                "forward",
-                "前进",
-                true,
-                accel(Code::ArrowRight, Modifiers::empty()),
-            ),
-            &MenuItem::with_id("reload", "刷新", true, accel(Code::KeyR, Modifiers::empty())),
+            &nav_back,
+            &nav_forward,
+            &nav_reload,
             &PredefinedMenuItem::separator(),
-            &MenuItem::with_id("home", "回到首页", true, accel(Code::KeyH, Modifiers::SHIFT)),
-            &MenuItem::with_id(
-                "open-external",
-                "在系统浏览器中打开",
-                true,
-                accel(Code::KeyO, Modifiers::SHIFT),
-            ),
+            &nav_home,
+            &nav_open,
         ],
     )?;
 
@@ -417,21 +561,21 @@ fn build_menu() -> Result<Menu, Box<dyn Error>> {
         "视图",
         true,
         &[
-            &MenuItem::with_id(
-                "settings",
-                "增强设置…",
-                true,
-                accel(Code::Comma, Modifiers::empty()),
-            ),
+            &view_shortcuts,
+            &view_settings,
             &PredefinedMenuItem::separator(),
-            &MenuItem::with_id(
-                "fullscreen",
-                "切换全屏",
-                true,
-                Some(Accelerator::new(None, Code::F11)),
-            ),
+            &view_fullscreen,
         ],
     )?;
+
+    track(&mut items, "back", &nav_back);
+    track(&mut items, "forward", &nav_forward);
+    track(&mut items, "reload", &nav_reload);
+    track(&mut items, "home", &nav_home);
+    track(&mut items, "open-external", &nav_open);
+    track(&mut items, "shortcuts", &view_shortcuts);
+    track(&mut items, "settings", &view_settings);
+    track(&mut items, "fullscreen", &view_fullscreen);
 
     // 所有子菜单都得先于 `top` 声明，否则引用活不过 Menu::with_items。
     #[cfg(target_os = "macos")]
@@ -512,7 +656,7 @@ fn build_menu() -> Result<Menu, Box<dyn Error>> {
     #[cfg(not(target_os = "macos"))]
     let top: Vec<&dyn muda::IsMenuItem> = vec![&file, &nav, &view, &help];
 
-    Ok(Menu::with_items(&top)?)
+    Ok((Menu::with_items(&top)?, items))
 }
 
 #[cfg(target_os = "macos")]

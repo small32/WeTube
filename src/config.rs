@@ -19,6 +19,11 @@ pub struct ConfigStore {
     schema: Value,
     /// 只有用户显式改过的项，没改过的不写进文件。
     overrides: Values,
+    /// 快捷键 id → spec 字符串（如 `Mod+Shift+H`）。没改过的不写。
+    ///
+    /// 跟增强功能配置分开存，两者结构不一样：那边是 feature → 点分路径 → 值，
+    /// 这边是扁平的一层。混在一起会让 `full_config()` 多出一堆无关字段。
+    shortcuts: Map<String, Value>,
     path: PathBuf,
 }
 
@@ -34,11 +39,14 @@ impl ConfigStore {
     pub fn load() -> Result<Self, ConfigError> {
         let schema: Value = serde_json::from_str(SCHEMA_JSON)?;
         let path = config_path();
-        let overrides = match fs::read_to_string(&path) {
-            Ok(text) => serde_json::from_str(&text).unwrap_or_default(),
-            Err(_) => Values::new(),
-        };
-        Ok(Self { schema, overrides, path })
+        let root: Value = fs::read_to_string(&path)
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default();
+
+        let (overrides, shortcuts) = split_saved(root);
+
+        Ok(Self { schema, overrides, shortcuts, path })
     }
 
     pub fn schema(&self) -> &str {
@@ -73,13 +81,70 @@ impl ConfigStore {
         self.save()
     }
 
+    /// 某项快捷键的用户自定义值，没改过返回 `None`。
+    pub fn shortcut(&self, id: &str) -> Option<&str> {
+        self.shortcuts.get(id).and_then(Value::as_str)
+    }
+
+    /// 整张快捷键表，喂给设置面板渲染用。
+    pub fn shortcuts(&self) -> &Map<String, Value> {
+        &self.shortcuts
+    }
+
+    /// 设置快捷键并落盘。`spec` 传 `None` 表示恢复默认。
+    pub fn set_shortcut(&mut self, id: &str, spec: Option<&str>) -> Result<(), ConfigError> {
+        match spec {
+            Some(value) => {
+                self.shortcuts
+                    .insert(id.to_string(), Value::String(value.to_string()));
+            }
+            None => {
+                self.shortcuts.remove(id);
+            }
+        }
+        self.save()
+    }
+
+    /// 全部快捷键恢复默认。
+    pub fn reset_shortcuts(&mut self) -> Result<(), ConfigError> {
+        self.shortcuts.clear();
+        self.save()
+    }
+
     fn save(&self) -> Result<(), ConfigError> {
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let text = serde_json::to_string_pretty(&self.overrides)?;
+        let root = serde_json::json!({
+            "features": self.overrides,
+            "shortcuts": self.shortcuts,
+        });
+        let text = serde_json::to_string_pretty(&root)?;
         fs::write(&self.path, text)?;
         Ok(())
+    }
+}
+
+/// 从配置文件内容里拆出 feature 覆盖表和快捷键表。
+///
+/// 加了快捷键之后 settings.json 变成 `{ "features": …, "shortcuts": … }` 两层。
+/// 早期版本顶层直接就是 feature 覆盖表，这里认不出新格式就按老格式读，
+/// 别把用户已经配好的东西弄丢。
+fn split_saved(root: Value) -> (Values, Map<String, Value>) {
+    let wrapped = root.get("features").is_some() || root.get("shortcuts").is_some();
+    if wrapped {
+        (
+            root.get("features")
+                .and_then(Value::as_object)
+                .cloned()
+                .unwrap_or_default(),
+            root.get("shortcuts")
+                .and_then(Value::as_object)
+                .cloned()
+                .unwrap_or_default(),
+        )
+    } else {
+        (root.as_object().cloned().unwrap_or_default(), Map::new())
     }
 }
 
@@ -224,6 +289,31 @@ mod tests {
         // 同一层级的其它键不能被覆盖冲掉
         assert_eq!(merged["hideShorts"]["search"]["enabled"], false);
         assert_eq!(merged["hidePosts"]["enabled"], false);
+    }
+
+    /// 加了快捷键之后 settings.json 多了一层，老文件得还能读。
+    #[test]
+    fn split_saved_reads_legacy_and_wrapped() {
+        // 老格式：顶层直接是 feature 覆盖表
+        let legacy = serde_json::json!({ "hideShorts": { "home": { "enabled": true } } });
+        let (overrides, shortcuts) = split_saved(legacy);
+        assert_eq!(overrides["hideShorts"]["home"]["enabled"], true);
+        assert!(shortcuts.is_empty(), "老文件里没有快捷键");
+
+        // 新格式：features / shortcuts 各占一块
+        let wrapped = serde_json::json!({
+            "features": { "hideShorts": { "home": { "enabled": true } } },
+            "shortcuts": { "reload": "Mod+Shift+R" },
+        });
+        let (overrides, shortcuts) = split_saved(wrapped);
+        assert_eq!(overrides["hideShorts"]["home"]["enabled"], true);
+        assert_eq!(shortcuts["reload"], "Mod+Shift+R");
+
+        // 空文件 / 空对象不能炸
+        let (overrides, shortcuts) = split_saved(Value::Null);
+        assert!(overrides.is_empty() && shortcuts.is_empty());
+        let (overrides, shortcuts) = split_saved(serde_json::json!({}));
+        assert!(overrides.is_empty() && shortcuts.is_empty());
     }
 
     #[test]
