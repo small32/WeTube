@@ -269,7 +269,6 @@ mod tests {
         // 点分路径要展开成嵌套对象
         assert_eq!(defaults["deepDarkCSS"]["colors"]["mainColor"], "#367bf0");
         assert_eq!(defaults["hideShorts"]["home"]["enabled"], false);
-        assert_eq!(defaults["volumeBoost"]["amount"], 5);
         // 布尔开关的默认值统一是 false（屏显除外，它默认开）
         assert_eq!(defaults["hidePosts"]["enabled"], false);
         assert_eq!(defaults["onScreenDisplay"]["enabled"], true);

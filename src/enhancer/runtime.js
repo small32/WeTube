@@ -35,7 +35,7 @@
 	function isEnabled(id) {
 		const node = YTE.config[id];
 		if (!node) return false;
-		// playlistManagementButtons 这类没有顶层 enabled，任一子开关打开就算启用
+		// 某些功能没有顶层 enabled（由子开关控制），任一子开关打开就算启用
 		if (node.enabled === undefined) return deepAnyTrue(node);
 		return node.enabled === true;
 	}

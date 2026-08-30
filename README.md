@@ -3,7 +3,7 @@
 WeTube 是一个用 Rust 写的 YouTube 桌面端App：一个装 youtube.com 的 `WKWebView` /
 `WebView2`，加后退 / 前进 / 刷新三个按钮（以及更多），同时支持 macOS 和 Windows，
 并把 [YouTube-Enhancer](https://github.com/YouTube-Enhancer/extension)
-扩展的 **58 个功能、135 个可调节项**直接内建进了程序——不是让你去装扩展，是程序自带。
+扩展的功能直接内建进了程序——不是让你去装扩展，是程序自带。目前内置 **41 个功能、77 个可调节项**。
 
 | 平台   | 网页内核                    | 说明                                   |
 | ------ | --------------------------- | -------------------------------------- |
@@ -27,7 +27,7 @@ WeTube 是一个用 Rust 写的 YouTube 桌面端App：一个装 youtube.com 的
 
 点工具栏最右边的齿轮（或按 `Cmd/Ctrl + ,`）打开设置面板：
 
-- **136 个可调节项全部自动生成**，加一项只需要改 `src/enhancer/schema.json` 一处
+- **77 个可调节项全部自动生成**，加一项只需要改 `src/enhancer/schema.json` 一处
 - 按内容过滤 / 播放器 / 按钮 / Shorts / 播放列表 / 外观 / 高级分成 7 组，支持搜索
 - 改动即时生效，自动存盘
 
@@ -38,9 +38,7 @@ WeTube 是一个用 Rust 写的 YouTube 桌面端App：一个装 youtube.com 的
 | macOS   | `~/Library/Application Support/WeTube/settings.json` |
 | Windows | `%APPDATA%\WeTube\settings.json`                 |
 
-**进度**：60 个功能条目里已实现 41 个。剩下 19 个主要是播放器按钮类——它们依赖原扩展的
-`buttonController`（一个 36KB 的按钮注入系统，含控制栏插槽、功能菜单、全屏重定位），
-需要单独移植，见下方「尚未实现」。设置面板里未实现的功能会灰显并标注。
+**进度**：41 个功能条目全部已实现，设置面板里每一项都能正常生效。
 
 ## 相比原版多了什么
 
@@ -168,19 +166,6 @@ icons/
   app.ico                Windows 嵌入用
   AppIcon.iconset/*.png  macOS iconset
 ```
-
-## 尚未实现（19 个）
-
-这些功能在设置面板里**配置齐全但灰显标注**，等对应基础设施落地后即可启用：
-
-| 卡在什么上 | 功能 |
-| ---------- | ---- |
-| 需要移植 `buttonController`（播放器按钮注入系统：4 种插槽、功能菜单、全屏重定位） | `playbackSpeedButtons` `forwardRewindButtons` `loopButton` `maximizePlayerButton` `miniPlayerButton` `copyTimestampUrlButton` `screenshotButton` `openTranscriptButton` `hideEndScreenCardsButton` `flipVideoButtons` `saveToWatchLaterButton` `featureMenu` |
-| 需要移植 `audioEngine`（WebAudio 图） | `volumeBoost` `monoToStereoButton` |
-| 复杂 DOM 注入 | `miniPlayer` `timestampPeek` `playlistLength` `playlistReverseButton` `playlistManagementButtons` |
-
-顺带一提，原扩展的 `pauseBackgroundPlayers` 我没搬——它的作用是暂停**其他标签页**
-的播放器，桌面端App只有一个页面，没有意义。
 
 ## 已知限制
 
