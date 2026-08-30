@@ -304,6 +304,13 @@ fn handle_panel_message(
             };
             apply_shortcut(store, webview, menu_items, id, Some(spec));
         }
+        // 前端的调试回传。页面的状态（有没有进元素全屏、铺满 class 挂没挂上）
+        // 在 Rust 这边看不到，只能让它报回来。
+        Some("debug") => {
+            if let Some(msg) = payload.get("msg").and_then(Value::as_str) {
+                debug_log(&format!("页面: {msg}"));
+            }
+        }
         Some("shortcut:reset") => {
             // 带 id 只恢复一项，不带就全部恢复默认
             match payload.get("id").and_then(Value::as_str) {
@@ -558,6 +565,7 @@ fn init_script(store: &ConfigStore) -> String {
          window.__YTE_CONFIG__ = {config};\n\
          window.__WETUBE_PLATFORM__ = \"{platform}\";\n\
          window.__WETUBE_SHORTCUTS__ = {shortcuts};\n\
+         window.__WETUBE_DEBUG__ = {debug};\n\
          {presets}\n\
          {assets}\n\
          {titlebar}\n\
@@ -568,6 +576,7 @@ fn init_script(store: &ConfigStore) -> String {
         config = js_literal(&store.full_config().to_string()),
         platform = PLATFORM,
         shortcuts = shortcuts::registry_json(store.shortcuts()),
+        debug = if debug_enabled() { "true" } else { "false" },
         presets = DEEPDARK_PRESETS_JS,
         assets = ENHANCER_ASSETS_JS,
         titlebar = TITLEBAR_JS,

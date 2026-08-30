@@ -328,10 +328,31 @@ html.wetube-video-fill video {
    * 三条同时成立才铺：窗口全屏、没进元素全屏、在播放页。
    * 第二条是关键——元素全屏已经成功时浏览器自己会铺满，再糊一层会打架。
    */
+  let fillTimer = null;
+
+  /** 把页面这边的状态回传给 Rust 打日志。只在 WETUBE_DEBUG=1 时真的发。 */
+  function report(msg) {
+    if (!window.__WETUBE_DEBUG__) return;
+    try {
+      window.ipc.postMessage(JSON.stringify({ type: "debug", msg }));
+    } catch (e) {
+      /* 忽略 */
+    }
+  }
+
   function refreshVideoFill() {
-    document.documentElement.classList.toggle(
-      "wetube-video-fill",
-      windowFullscreen && !elementIsFullscreen() && isWatchPage()
+    const on = windowFullscreen && !elementIsFullscreen() && isWatchPage();
+    if (on) {
+      // ⚠️ 注入的 <style> 会被导航冲掉（YouTube 切页会换 document）。
+      // 挂着 class 却没有样式 = 什么都没发生，所以每次用之前先补一次。
+      mountFillStyle();
+    }
+    document.documentElement.classList.toggle("wetube-video-fill", on);
+    report(
+      `铺满=${on} (窗口全屏=${windowFullscreen}, 元素全屏=${elementIsFullscreen()}, ` +
+        `播放页=${isWatchPage()}, 样式在=${Boolean(
+          document.getElementById("wetube-video-fill-style")
+        )})`
     );
   }
 
@@ -375,12 +396,14 @@ html.wetube-video-fill video {
       btn.click();
     }
 
-    if (!windowFullscreen) {
-      refreshVideoFill(); // 退出：立刻撤掉
-    } else {
-      // 进入：等一拍看原生有没有成功，没成功再上 CSS
-      setTimeout(refreshVideoFill, 400);
-    }
+    // 立刻按当前状态刷新，不等：原生成了就撤 CSS，没成就马上铺满。
+    // 早先这里先等 400ms 再判定，那段时间窗口已经全屏、页面还是正常布局，
+    // 看上去就是「全屏了但视频下面还挂着订阅栏和接下来播放」。
+    refreshVideoFill();
+    // 原生的 requestFullscreen 是异步的，落地时间不定，稍后再复核一次
+    clearTimeout(fillTimer);
+    fillTimer = setTimeout(refreshVideoFill, 400);
+
     return isWatchPage();
   };
 
