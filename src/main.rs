@@ -15,6 +15,8 @@
 use std::collections::HashMap;
 use std::error::Error;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use tao::{
@@ -395,8 +397,63 @@ fn sync_fullscreen_chrome(window: &Window, webview: &WebView) {
     eval(webview, &format!("window.__wetubeSetChromeVisible?.({visible})"));
 }
 
+/// 上次执行 fullscreen 指令的时刻，用来去重。
+///
+/// 全屏指令有两条独立来源：
+///   1. 菜单加速键 —— muda 把快捷键注册成 NSMenuItem 的 key equivalent；
+///   2. 页面里的快捷键分发 —— `src/ui.js` 的 keydown 按注册表查出 id 后发 IPC。
+///
+/// 理想情况下 AppKit 处理 key equivalent 时会把按键吃掉，页面收不到；但按键
+/// 有时会继续传到 WKWebView，于是两条路径都触发一次 `act("fullscreen")`。
+/// 第一次按 `window.fullscreen().is_none()` 判定要进入，第二次状态已更新，
+/// 判定成退出——表现就是「刚进全屏又被弹回来」。
+/// 播放页上看不出来，是因为浏览器的元素全屏把窗口那一下抖动盖住了。
+static LAST_FULLSCREEN: Mutex<Option<Instant>> = Mutex::new(None);
+
+/// 去重窗口。两条路径的间隔通常只有几毫秒，250ms 足够覆盖；
+/// 又不至于妨碍用户隔一小会儿再按一次切回窗口。
+const FULLSCREEN_DEDUPE: Duration = Duration::from_millis(250);
+
+/// 窗口期内重复到达的 fullscreen 指令判为重复触发，直接丢弃。
+///
+/// 只对 fullscreen 做：它是个开关，重复执行一次就翻转了。
+/// 后退 / 刷新那些是「重复执行没什么副作用」或「用户可能真想连按两次」的，
+/// 拦了反而碍事。
+fn fullscreen_is_duplicate() -> bool {
+    let Ok(mut last) = LAST_FULLSCREEN.lock() else {
+        return false;
+    };
+    let now = Instant::now();
+    let duplicate = last.is_some_and(|t| now.duration_since(t) < FULLSCREEN_DEDUPE);
+    if !duplicate {
+        *last = Some(now);
+    }
+    duplicate
+}
+
+/// 调试日志开关：设了 `WETUBE_DEBUG=1` 才输出，平时只有一次 OnceLock 查表。
+///
+/// 排查快捷键「被触发了几次、每次看到的窗口状态是什么」时开：
+///   WETUBE_DEBUG=1 ~/WorkBuddy/WeTube/target/release/WeTube.app/Contents/MacOS/WeTube
+fn debug_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("WETUBE_DEBUG").is_some())
+}
+
+fn debug_log(line: &str) {
+    if debug_enabled() {
+        eprintln!("[WeTube] {line}");
+    }
+}
+
 /// 执行一条来自工具栏或菜单的指令。
 fn act(webview: &WebView, window: &Window, action: &str) {
+    if debug_enabled() {
+        debug_log(&format!(
+            "act({action}) 进入时全屏={}",
+            window.fullscreen().is_some()
+        ));
+    }
     match action {
         "back" => eval(webview, "history.back()"),
         "forward" => eval(webview, "history.forward()"),
@@ -411,7 +468,13 @@ fn act(webview: &WebView, window: &Window, action: &str) {
         // 菜单事件走 menu 分支，键盘快捷键走这里，两边都能开。
         "shortcuts" => eval(webview, "window.__wetubeToggleShortcutPanel?.()"),
         "fullscreen" => {
+            // 菜单和页面可能各触发一次，丢掉紧接着的重复那次
+            if fullscreen_is_duplicate() {
+                debug_log("act(fullscreen) 判为重复触发，丢弃");
+                return;
+            }
             let next_full = window.fullscreen().is_none();
+            debug_log(&format!("act(fullscreen) 切换为 next_full={next_full}"));
             window.set_fullscreen(if next_full {
                 Some(Fullscreen::Borderless(None))
             } else {
