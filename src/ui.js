@@ -316,11 +316,16 @@ html.wetube-video-fill video {
   const elementIsFullscreen = () =>
     Boolean(document.fullscreenElement || document.webkitFullscreenElement);
 
+  /**
+   * 是否在播放页。
+   *
+   * 必须同时看路径和播放器元素：
+   * 光看元素会误判——首页开着小窗播放器、或刚从播放页切回来元素还没清，
+   * 都会命中，结果把首页的滚动给锁死（铺满样式里有 overflow: hidden）。
+   */
   const isWatchPage = () =>
-    Boolean(
-      document.querySelector("#movie_player") ||
-        document.querySelector(".html5-video-player")
-    );
+    /^\/(watch|embed)\b/.test(location.pathname) &&
+    Boolean(document.querySelector("#movie_player, .html5-video-player"));
 
   /**
    * 决定要不要用 CSS 把播放器铺满。

@@ -30,11 +30,14 @@ const WATCH_PAGE = `
 `;
 const HOME_PAGE = `<div>首页内容</div>`;
 
-function setup(bodyHtml) {
+const WATCH_URL = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+const HOME_URL = "https://www.youtube.com/";
+
+function setup(bodyHtml, url = WATCH_URL) {
   const dom = new JSDOM(
     `<!doctype html><html><body>${bodyHtml}</body></html>`,
     {
-      url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+      url,
       runScripts: "outside-only",
       pretendToBeVisual: true,
     }
@@ -195,6 +198,25 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     window.__wetubeSyncPlayerFullscreen(false);
     check("目标变化时仍然会点", clicks() === 2, `点了 ${clicks()} 次`);
     setElementFullscreen(window, null);
+  }
+
+  // 12. 首页绝不能被铺满——铺满样式带 overflow:hidden，会锁死页面滚动。
+  //     首页有时候也会有播放器元素（小窗播放、切页残留），只靠元素判断会误伤。
+  {
+    const { window } = setup(WATCH_PAGE, HOME_URL);
+    window.__wetubeSyncPlayerFullscreen(true);
+    check(
+      "首页即使有播放器元素也不铺满",
+      !hasFill(window),
+      "铺满会把页面滚动锁死"
+    );
+  }
+
+  // 13. 播放页（/watch）仍然要正常铺满
+  {
+    const { window } = setup(WATCH_PAGE, WATCH_URL);
+    window.__wetubeSyncPlayerFullscreen(true);
+    check("播放页仍然会铺满", hasFill(window) === true);
   }
 
   let failed = 0;
