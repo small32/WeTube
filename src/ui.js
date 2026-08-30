@@ -54,6 +54,34 @@
 }
 `;
 
+  /* 窗口全屏时把播放器铺满整个 webview。
+   *
+   * 为什么需要这个：从菜单 / F11 进全屏时，我们是合成调用，拿不到用户激活
+   * （user activation），WebKit 会直接拒绝 requestFullscreen()——包括点
+   * YouTube 全屏按钮那条路。所以光靠点按钮不可靠，得有一条不依赖手势的兜底。
+   *
+   * 只在「窗口全屏 + 没进元素全屏 + 在播放页」三条同时成立时才挂这个 class。
+   * 元素全屏成功时浏览器自己会铺满，两套并存会打架。 */
+  const FILL_STYLE = `
+html.wetube-video-fill, html.wetube-video-fill body {
+  overflow: hidden !important;
+}
+html.wetube-video-fill #movie_player,
+html.wetube-video-fill .html5-video-player {
+  position: fixed !important;
+  top: 0 !important; right: 0 !important; bottom: 0 !important; left: 0 !important;
+  width: 100vw !important;
+  height: 100vh !important;
+  z-index: 2147483646 !important;
+  background: #000 !important;
+}
+html.wetube-video-fill video {
+  width: 100% !important;
+  height: 100% !important;
+  object-fit: contain !important;
+}
+`;
+
   const isYouTube = () =>
     /(^|\.)youtube\.com$/.test(location.hostname) ||
     /(^|\.)youtube-nocookie\.com$/.test(location.hostname);
@@ -66,6 +94,15 @@
     style.textContent = SUPPORT_STYLE;
     (document.head || document.documentElement).appendChild(style);
     applyShift(isYouTube());
+  }
+
+  /** 铺满用的样式跟 chrome 无关，macOS 上（不渲染 chrome）也要注入。 */
+  function mountFillStyle() {
+    if (document.getElementById("wetube-video-fill-style")) return;
+    const style = document.createElement("style");
+    style.id = "wetube-video-fill-style";
+    style.textContent = FILL_STYLE;
+    (document.head || document.documentElement).appendChild(style);
   }
 
   function applyShift(on) {
@@ -258,32 +295,92 @@
     return bar.style.display !== "none";
   };
 
-  // YouTube 播放器按钮走的是 HTML5 元素全屏（document.fullscreenElement），
-  // 那只是把视频撑满 webview；App 窗口本身没动。这里把两者联动起来：
-  // 点播放器全屏 → 窗口一并全屏（chrome 由 Rust 侧藏掉），退出全屏 → 窗口还原。
-  // F11 走的是 tao 窗口全屏，不产生 fullscreenchange，两套逻辑互不干扰。
+  // ---- 全屏联动 ----
+  //
+  // 目标：窗口全屏和播放器全屏表现一致，三个入口殊途同归——
+  //   1. 菜单「切换全屏」
+  //   2. 全屏快捷键（默认 F11，可自定义）
+  //   3. 播放器自己的全屏按钮
+  // 都让视频真正铺满屏幕。
+  //
+  // 三个入口的实现路径不一样：
+  //   入口 3 是真实用户手势，元素全屏（requestFullscreen）能成，由浏览器铺满；
+  //   入口 1、2 是 Rust 侧的合成调用，拿不到用户激活，WebKit 会拒绝
+  //   requestFullscreen——所以必须有不依赖手势的兜底（CSS 铺满）。
+
+  /** 窗口是否全屏。由 Rust 侧告知，见 __wetubeSyncPlayerFullscreen。 */
+  let windowFullscreen = false;
+
+  const elementIsFullscreen = () =>
+    Boolean(document.fullscreenElement || document.webkitFullscreenElement);
+
+  const isWatchPage = () =>
+    Boolean(
+      document.querySelector("#movie_player") ||
+        document.querySelector(".html5-video-player")
+    );
+
+  /**
+   * 决定要不要用 CSS 把播放器铺满。
+   *
+   * 三条同时成立才铺：窗口全屏、没进元素全屏、在播放页。
+   * 第二条是关键——元素全屏已经成功时浏览器自己会铺满，再糊一层会打架。
+   */
+  function refreshVideoFill() {
+    document.documentElement.classList.toggle(
+      "wetube-video-fill",
+      windowFullscreen && !elementIsFullscreen() && isWatchPage()
+    );
+  }
+
+  /**
+   * 已经发出、但还没等到 fullscreenchange 的那次点击的目标状态。
+   * `null` 表示没有待确认的点击。见 __wetubeSyncPlayerFullscreen 里的去重。
+   */
+  let pendingClick = null;
+
   const syncPlayerFullscreen = () => {
+    pendingClick = null; // 结果到了，解除去重闸
     const fsEl = document.fullscreenElement || document.webkitFullscreenElement;
+    if (!fsEl) {
+      // 退出元素全屏 → 窗口全屏紧接着也会退（Rust 收到 off 就退）。
+      // 这里先本地置 false，否则这一瞬间会被判成「窗口全屏 + 非元素全屏」
+      // 从而糊上一层 CSS，画面闪一下。
+      windowFullscreen = false;
+    }
     send(fsEl ? "player-fullscreen:on" : "player-fullscreen:off");
+    refreshVideoFill();
   };
   document.addEventListener("fullscreenchange", syncPlayerFullscreen, true);
   document.addEventListener("webkitfullscreenchange", syncPlayerFullscreen, true);
+  window.addEventListener("yt-navigate-finish", refreshVideoFill);
 
   /**
-   * 把播放器的全屏状态对齐到窗口全屏（菜单 / F11 / 自定义快捷键走这里）。
-   *
-   * 只点 YouTube 自己的全屏按钮，不用 `video.requestFullscreen()`——后者只把
-   * 视频元素撑满，绕过了 YouTube 那套（控制栏、双击退出、Esc 退出都还在）。
-   * 不在播放页时（首页、订阅页）按钮不存在，直接返回 false，什么也不做。
-   *
-   * 点了按钮会触发 fullscreenchange，那边再把状态回报给 Rust。不会来回打架：
-   * 上报那条分支只调 set_fullscreen，不会再反过来点按钮。
+   * 窗口全屏状态变化时由 Rust 调用（菜单 / F11 / 自定义快捷键、以及 Esc 和
+   * 绿色按钮这类系统退出路径）。
    */
   window.__wetubeSyncPlayerFullscreen = (wantFull) => {
+    windowFullscreen = Boolean(wantFull);
+
+    // 先试原生：点 YouTube 自己的全屏按钮，控制栏、双击退出、Esc 退出这些
+    // 行为都能保留。成了最好，不成也无所谓——下面有兜底。
     const btn = document.querySelector(".ytp-fullscreen-button");
-    if (!btn) return false;
-    const isFull = Boolean(document.fullscreenElement || document.webkitFullscreenElement);
-    if (isFull !== Boolean(wantFull)) btn.click();
-    return true;
+    if (btn && elementIsFullscreen() !== windowFullscreen && pendingClick !== windowFullscreen) {
+      // ⚠️ Rust 侧会连着调两次：act("fullscreen") 一次，紧跟着 Resized 又一次。
+      // 不加这道闸就会连点两下，第一下刚进的全屏被第二下取消掉。
+      // 用「待确认的目标状态」而不是时间冷却——目标变了（进→退）仍然要能点。
+      pendingClick = windowFullscreen;
+      btn.click();
+    }
+
+    if (!windowFullscreen) {
+      refreshVideoFill(); // 退出：立刻撤掉
+    } else {
+      // 进入：等一拍看原生有没有成功，没成功再上 CSS
+      setTimeout(refreshVideoFill, 400);
+    }
+    return isWatchPage();
   };
+
+  mountFillStyle();
 })();
