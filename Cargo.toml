@@ -1,6 +1,6 @@
 [package]
 name = "WeTube"
-version = "1.0.0"
+version = "2.0.1"
 edition = "2024"
 description = "WeTube：一个同时支持 macOS 与 Windows 的 YouTube 桌面端App（内建 YouTube-Enhancer）"
 # 字幕翻译模块移植自 read-frog (https://github.com/mengxi-ream/read-frog)，该项目为 GPL-3.0。
