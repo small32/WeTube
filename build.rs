@@ -108,15 +108,61 @@ fn windows_icon() {
     // 之前设成「WeTube — YouTube 桌面壳」导致系统进程里出现「YouTube桌面壳」；
     // 若不设置，winresource 会默认填包名（WeTube），仍然会显示。
     // 显式设为空字符串，让描述列完全空白。
-    let result = winresource::WindowsResource::new()
-        .set_icon("icons/app.ico")
+    let mut resource = winresource::WindowsResource::new();
+    resource
         .set("FileDescription", "")
         .set("ProductName", "WeTube")
         .set("CompanyName", "WeTube")
         .set("OriginalFilename", "WeTube.exe")
-        .compile();
+        .set_icon("icons/app.ico");
+
+    // winresource 默认靠查注册表定位 rc.exe；受限环境（注册表工具被禁）下会
+    // 报「系统找不到指定的路径」。这里改成直接按文件系统找 Windows SDK 的
+    // rc.exe，找到了就显式传给 winresource，彻底不依赖注册表。找不到时
+    // 保持默认行为（注册表探测），对正常开发机无影响。
+    if let Some(rc_dir) = find_rc_dir() {
+        if let Some(path) = rc_dir.to_str() {
+            resource.set_toolkit_path(path);
+        }
+    }
+
+    let result = resource.compile();
 
     if let Err(err) = result {
         println!("cargo:warning=嵌入 Windows 图标失败（不影响运行）: {err}");
     }
+}
+
+/// 在标准安装位置按文件系统找最新版本 Windows SDK 的 rc.exe 所在目录。
+///
+/// winresource 的 `set_toolkit_path` 约定：msvc 工具链下传入的目录会被直接
+/// 拼上 `rc.exe`（找不到再试 `bin\x64` / `bin\x86`），所以这里返回
+/// `...\bin\<版本>\x64` 这一层。
+fn find_rc_dir() -> Option<PathBuf> {
+    let root = Path::new(r"C:\Program Files (x86)\Windows Kits\10\bin");
+    let mut best: Option<(String, PathBuf)> = None;
+    let entries = fs::read_dir(root).ok()?;
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        // 版本目录形如 10.0.26100.0；跳过 x86 / arm64 这类非版本目录。
+        if !name
+            .chars()
+            .next()
+            .map_or(false, |c| c.is_ascii_digit())
+        {
+            continue;
+        }
+        // 优先 x64（宿主绝大多数是 x64），其次 x86。
+        for arch in ["x64", "x86"] {
+            let dir = entry.path().join(arch);
+            let better = match &best {
+                Some((version, _)) => name.as_str() > version.as_str(),
+                None => true,
+            };
+            if dir.join("rc.exe").is_file() && better {
+                best = Some((name.clone(), dir));
+            }
+        }
+    }
+    best.map(|(_, dir)| dir)
 }

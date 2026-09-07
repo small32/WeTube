@@ -266,6 +266,62 @@
       ]
     },
     {
+      "id": "subtitleTranslation",
+      "label": "字幕双语翻译",
+      "desc": "在播放器控制栏注入翻译按钮，点一下即可把 YouTube 原生字幕实时翻成目标语言，译文显示在字幕下方；翻译请求经本机转发",
+      "group": "player",
+      "pages": [
+        "watch"
+      ],
+      "fields": [
+        {
+          "key": "enabled",
+          "type": "boolean",
+          "default": true,
+          "label": "显示翻译按钮"
+        },
+        {
+          "key": "targetLang",
+          "type": "select",
+          "default": "zh-CN",
+          "label": "目标语言",
+          "parent": "enabled",
+          "options": [
+            "zh-CN",
+            "zh-TW",
+            "en",
+            "ja",
+            "ko",
+            "fr",
+            "de",
+            "es",
+            "ru"
+          ]
+        },
+        {
+          "key": "replaceOriginal",
+          "type": "boolean",
+          "default": false,
+          "label": "只显示译文（替换原文）",
+          "parent": "enabled"
+        },
+        {
+          "key": "fontSize",
+          "type": "select",
+          "default": "标准",
+          "label": "字幕字号",
+          "parent": "enabled",
+          "options": [
+            "小",
+            "标准",
+            "大",
+            "特大",
+            "超大"
+          ]
+        }
+      ]
+    },
+    {
       "id": "hideEndScreenCards",
       "label": "隐藏片尾卡片",
       "desc": "隐藏视频结尾弹出的推荐卡片",

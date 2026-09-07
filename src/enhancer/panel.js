@@ -11,6 +11,16 @@
 	const { cfg, setConfig, isEnabled, log } = YTE;
 
 	const PANEL_ID = "yte-settings-panel";
+	// 构建号戳：显示在面板底部，用于确认运行的是哪个版本（每次发布手动更新）。
+	const BUILD_STAMP = "20260906-2249";
+
+	// 页面里没有 devtools，任何 JS 错误都记到全局，面板 footer 会显示出来。
+	window.addEventListener("error", (event) => {
+		window.__YTE_PAGE_ERROR__ = `${event.message} @ ${String(event.filename ?? "").split("/").pop()}:${event.lineno}`;
+	});
+	window.addEventListener("unhandledrejection", (event) => {
+		window.__YTE_PAGE_ERROR__ = `未处理的 Promise 拒绝: ${event.reason}`;
+	});
 	let root = null;
 
 	// ---------------------------------------------------------------- 样式
@@ -152,16 +162,11 @@
 		return node;
 	}
 
-	/** 按点分路径读值。 */
-	function readPath(object, path) {
-		return path.split(".").reduce((acc, part) => (acc == null ? acc : acc[part]), object);
-	}
-
 	function buildField(feature, field, onChange) {
-		const value = readPath(cfg(feature.id), field.key);
+		const value = cfg(feature.id, field.key);
 		const wrap = el("div", { class: "yte-field" });
 		if (field.parent) {
-			const parentValue = readPath(cfg(feature.id), field.parent);
+			const parentValue = cfg(feature.id, field.parent);
 			if (parentValue === false) wrap.classList.add("is-disabled");
 		}
 
@@ -215,7 +220,7 @@
 		const main = feature.fields?.find((field) => field.key === "enabled");
 		if (main) {
 			const toggle = el("input", { type: "checkbox" });
-			toggle.checked = Boolean(readPath(cfg(feature.id), "enabled"));
+			toggle.checked = Boolean(cfg(feature.id, "enabled"));
 			toggle.addEventListener("change", () => {
 				onChange("enabled", toggle.checked);
 				card.classList.toggle("is-off", !toggle.checked);
@@ -254,9 +259,19 @@
 			const features = (YTE.schema.features ?? []).filter((feature) => feature.group === group.id);
 			if (!features.length) continue;
 
-			const cards = features
-				.filter((feature) => !needle || `${feature.id} ${feature.label} ${feature.desc ?? ""}`.toLowerCase().includes(needle))
-				.map((feature) => buildCard(feature, (key, value) => onConfigChange(feature.id, key, value)));
+			const cards = [];
+			for (const feature of features) {
+				if (needle && !`${feature.id} ${feature.label} ${feature.desc ?? ""}`.toLowerCase().includes(needle)) continue;
+				try {
+					cards.push(buildCard(feature, (key, value) => onConfigChange(feature.id, key, value)));
+				} catch (err) {
+					// 单卡渲染出错不能拖垮整个面板：显示错误详情而不是静默消失。
+					cards.push(el("div", { class: "yte-card", "data-feature": feature.id }, [
+						el("div", { class: "yte-card-title", text: `${feature.label ?? feature.id}（渲染出错）` }),
+						el("div", { class: "yte-card-desc", text: String((err && err.stack) || err) }),
+					]));
+				}
+			}
 
 			if (!cards.length) continue;
 			body.append(el("div", { class: "yte-group-title", text: group.label }), ...cards);
@@ -304,11 +319,27 @@
 		const total = (YTE.schema.features ?? []).reduce((sum, feature) => sum + (feature.fields?.length ?? 0), 0);
 		const done = (YTE.schema.features ?? []).filter((feature) => YTE.features[feature.id]).length;
 
+		// 运行时自诊断：schema 是否真的进了页面、目标功能在不在、有无 JS 错误。
+		const sub = YTE.__subtitleDebug?.() ?? {};
+		const diag = [
+			`schema ${YTE.schema.features?.length ?? 0} 功能`,
+			`字幕翻译: ${(YTE.schema.features ?? []).some((feature) => feature.id === "subtitleTranslation") ? "在" : "缺"}`,
+			`已注册 ${Object.keys(YTE.features).length}`,
+			`译钮:${sub.button ? "在" : sub.button === false ? "无" : "?"}@${sub.page ?? "?"}`,
+			`译请求 发${sub.sent ?? 0}/回${sub.recv ?? 0}`,
+		];
+		if (sub.lastError) diag.push(`译错误:${sub.lastError}`);
+		if (window.__YTE_PAGE_ERROR__) diag.push(`⚠ ${window.__YTE_PAGE_ERROR__}`);
+
 		panel.append(
 			el("header", {}, [el("h1", { text: "WeTube 增强设置" }), close]),
 			search,
 			body,
-			el("footer", {}, [el("span", { text: `${done}/${YTE.schema.features?.length ?? 0} 个功能已实现 · 共 ${total} 项设置` }), reset])
+			el("footer", {}, [
+				el("span", { text: `${done}/${YTE.schema.features?.length ?? 0} 个功能已实现 · 共 ${total} 项设置 · 构建 ${BUILD_STAMP}` }),
+				el("span", { text: diag.join(" · "), style: "margin-left:auto;font-size:11px;opacity:.75;" }),
+				reset,
+			])
 		);
 
 		root.append(style, backdrop, panel);

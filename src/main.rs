@@ -22,7 +22,7 @@ use serde_json::Value;
 use tao::{
     dpi::LogicalSize,
     event::{Event, WindowEvent},
-    event_loop::{ControlFlow, EventLoopBuilder},
+    event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy},
     window::{Fullscreen, Icon, Window, WindowBuilder},
 };
 use wry::{
@@ -36,6 +36,7 @@ use muda::MenuEvent;
 
 mod config;
 mod shortcuts;
+mod translate;
 use config::ConfigStore;
 
 const APP_NAME: &str = "WeTube";
@@ -79,6 +80,21 @@ enum Command {
     Ipc(String),
     #[cfg(target_os = "macos")]
     Menu(String),
+    /// 后台线程翻译完的结果。
+    ///
+    /// `WebView` 不能跨线程使用，所以工作线程翻译完不能直接 eval 回页面，
+    /// 只能经 `EventLoopProxy` 把结果送回主线程再 eval。
+    /// `id` 用来和页面那边的请求对号——字幕滚动很快，回来的顺序
+    /// 未必等于发出去的顺序，靠 id 才不会把译文安到错误的行上。
+    SubtitleTranslated {
+        id: String,
+        result: Result<String, String>,
+    },
+    /// 字幕轨道批量翻译结果（逐位对应，失败位为 None）。
+    SubtitleBatchTranslated {
+        id: String,
+        results: Vec<Option<String>>,
+    },
 }
 
 /// 把编译期嵌入的图标字节装成 tao::Icon。任何一步失败（图标文件缺失、PNG 解码异常等）
@@ -99,6 +115,9 @@ fn log_err(message: &str) {
     }
     eprintln!("[WeTube] {message}");
 }
+
+/// 翻译链路日志统一由 translate 模块提供（写入 %TEMP%\\WeTube-translate.log）。
+use translate::translate_log;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let mut store = ConfigStore::load()?;
@@ -154,6 +173,9 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 
     let ipc_proxy = event_loop.create_proxy();
+    // 翻译请求在后台线程里跑，结果要靠这个 proxy 送回主线程再 eval。
+    // ipc_proxy 稍后会被 move 进 IPC 回调，所以这里先克隆一份。
+    let translate_proxy = ipc_proxy.clone();
     let webview = WebViewBuilder::new()
         .with_url(HOME_URL)
         // 只注入主框架：这一坨有几百 KB，塞进每个 iframe 纯属浪费
@@ -222,11 +244,49 @@ fn main() -> Result<(), Box<dyn Error>> {
                     return;
                 }
                 match serde_json::from_str::<Value>(&msg) {
-                    Ok(Value::Object(payload)) => {
-                        handle_panel_message(&mut store, &webview, menu_items.as_ref(), &payload)
-                    }
+                    Ok(Value::Object(payload)) => handle_panel_message(
+                        &mut store,
+                        &webview,
+                        menu_items.as_ref(),
+                        &translate_proxy,
+                        &payload,
+                    ),
                     _ => act(&webview, &window, &msg),
                 }
+            }
+            // 后台线程翻译完，结果回到主线程——只有这里能碰 webview。
+            Event::UserEvent(Command::SubtitleTranslated { id, result }) => {
+                let (ok, payload) = match result {
+                    Ok(text) => (true, text),
+                    Err(err) => {
+                        // 失败也回传页面，让字幕位置显示一句提示，而不是静默什么都不发生。
+                        log_err(&format!("字幕翻译失败: {err}"));
+                        (false, err)
+                    }
+                };
+                // 一律用 serde_json 生成字面量：译文里可能有引号、换行、反斜杠，
+                // 手拼字符串迟早把 JS 语法搞坏。
+                let id_json = serde_json::to_string(&id).unwrap_or_else(|_| "\"\"".to_string());
+                let payload_json =
+                    serde_json::to_string(&payload).unwrap_or_else(|_| "\"\"".to_string());
+                eval(
+                    &webview,
+                    &format!(
+                        "window.__wetubeOnSubtitleTranslated?.({id_json}, {ok}, {payload_json})"
+                    ),
+                );
+            }
+            // 批量翻译结果：序列化成 JSON 数组（失败位 null）eval 回页面。
+            Event::UserEvent(Command::SubtitleBatchTranslated { id, results }) => {
+                let id_json = serde_json::to_string(&id).unwrap_or_else(|_| "\"\"".to_string());
+                let results_json = serde_json::to_string(&results)
+                    .unwrap_or_else(|_| "[]".to_string());
+                eval(
+                    &webview,
+                    &format!(
+                        "window.__wetubeOnSubtitleBatchTranslated?.({id_json}, {results_json})"
+                    ),
+                );
             }
             #[cfg(target_os = "macos")]
 Event::UserEvent(Command::Menu(id)) => {
@@ -263,9 +323,93 @@ fn handle_panel_message(
     store: &mut ConfigStore,
     webview: &WebView,
     menu_items: Option<&MenuItemMap>,
+    proxy: &EventLoopProxy<Command>,
     payload: &serde_json::Map<String, Value>,
 ) {
     match payload.get("type").and_then(Value::as_str) {
+        // 页面抓到一行字幕，送来翻译。
+        //
+        // 翻译是网络请求，耗时不可控，绝不能在这里同步等——那样会把整个
+        // 事件循环卡住，界面直接假死。丢到后台线程去跑，结果经 proxy 送回主线程。
+        Some("subtitle-translate") => {
+            let (Some(id), Some(text)) = (
+                payload.get("id").and_then(Value::as_str),
+                payload.get("text").and_then(Value::as_str),
+            ) else {
+                return;
+            };
+            // 目标语言没给就用中文；页面那边按设置传，这里只是兜底。
+            let target = payload
+                .get("targetLang")
+                .and_then(Value::as_str)
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or("zh-CN");
+
+            let id = id.to_string();
+            let text = text.to_string();
+            let target = target.to_string();
+            // 立即回执：页面据此区分"消息没到 Rust"和"到了但结果没回传"。
+            eval(webview, "window.__wetubeSubtitleAck?.()");
+            translate_log(&format!(
+                "recv id={id} target={target} chars={}",
+                text.chars().count()
+            ));
+            let proxy = proxy.clone();
+            std::thread::spawn(move || {
+                let result = translate::translate(&text, &target);
+                match &result {
+                    Ok(t) => translate_log(&format!("done id={id} OK chars={}", t.chars().count())),
+                    Err(e) => translate_log(&format!("done id={id} ERR {e}")),
+                }
+                if let Err(err) = proxy.send_event(Command::SubtitleTranslated { id, result }) {
+                    log_err(&format!("回传翻译结果失败: {err}"));
+                }
+            });
+        }
+        //
+        // 字幕轨道批量翻译：整条轨道按块送翻，逐位回传（失败位 null）。
+        Some("subtitle-translate-batch") => {
+            let (Some(id), Some(texts)) = (
+                payload.get("id").and_then(Value::as_str),
+                payload
+                    .get("texts")
+                    .and_then(Value::as_array)
+                    .map(|list| {
+                        list.iter()
+                            .map(|value| value.as_str().unwrap_or_default().to_string())
+                            .collect::<Vec<_>>()
+                    }),
+            ) else {
+                return;
+            };
+            let target = payload
+                .get("targetLang")
+                .and_then(Value::as_str)
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or("zh-CN");
+
+            let id = id.to_string();
+            let target = target.to_string();
+            eval(
+                webview,
+                &format!("window.__wetubeSubtitleAck?.({})", texts.len()),
+            );
+            translate_log(&format!(
+                "batch-recv id={id} items={} target={target}",
+                texts.len()
+            ));
+            let proxy = proxy.clone();
+            std::thread::spawn(move || {
+                let results = translate::translate_batch(&texts, &target);
+                let ok_count = results.iter().filter(|item| item.is_some()).count();
+                translate_log(&format!("batch-done id={id} ok={ok_count}/{}", results.len()));
+                if let Err(err) =
+                    proxy.send_event(Command::SubtitleBatchTranslated { id, results })
+                {
+                    log_err(&format!("回传批量翻译结果失败: {err}"));
+                }
+            });
+        }
         Some("config:set") => {
             let (Some(feature), Some(key)) = (
                 payload.get("feature").and_then(Value::as_str),

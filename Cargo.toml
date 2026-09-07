@@ -3,7 +3,10 @@ name = "WeTube"
 version = "1.0.0"
 edition = "2024"
 description = "WeTube：一个同时支持 macOS 与 Windows 的 YouTube 桌面端App（内建 YouTube-Enhancer）"
-license = "MIT"
+# 字幕翻译模块移植自 read-frog (https://github.com/mengxi-ream/read-frog)，该项目为 GPL-3.0。
+# 按 GPL-3.0 的传染性，本仓库一旦分发，整体需以 GPL-3.0 开源，故此处同步改为 GPL-3.0。
+# 若后续改为自行实现（不复用其代码），或取得商业授权，可改回 MIT。
+license = "GPL-3.0"
 repository = "http://small32.top:8418/winc0/WeTube"
 readme = "README.md"
 
@@ -17,6 +20,18 @@ serde_json = "1.0.151"
 tao = "0.37.0"
 thiserror = "2.0.20"
 wry = "0.56.1"
+# 字幕翻译要走 Rust 后端转发：注入脚本跑在 youtube.com 源下，直接 fetch 翻译接口会被 CORS 拦。
+# 用同步客户端是因为本项目只有 tao/wry，没有 tokio 之类的异步运行时。
+#
+# 选 minreq 而不是 ureq：ureq 依赖 url → idna → icu4x，为发一个 GET 请求要编译
+# 整套 ICU 国际化库和它的 proc-macro，编译时间长且在此环境下 rustc 会崩。
+# minreq 只有一千多行、不依赖 url crate，够用且轻。
+# https-native-tls 走系统 TLS（Windows Schannel / macOS Security.framework），
+# 不引入 rustls 那堆密码学代码。
+minreq = { version = "3", default-features = false, features = [
+    "https-native-tls",
+    "urlencoding",
+] }
 
 [build-dependencies]
 # 解码 PNG 图标为 RGBA，给 tao::Icon 用。

@@ -232,3 +232,70 @@ body.yte-videos-per-row ytd-rich-grid-renderer {
 		--ytd-rich-grid-posts-per-row: min(1, var(--yte-videos-per-row-count)) !important;
 	}
 }
+
+/* ------------------------------------------------------------ 字幕双语翻译 */
+
+/* 译文层：钉在原生字幕包围盒正下方，由 features.js 定位（left/top 内联写入）。 */
+.yte-subtitle-translation {
+	position: absolute;
+	transform: translateX(-50%);
+	max-width: 90%;
+	z-index: 60;
+	pointer-events: none;
+	text-align: center;
+	padding: 4px 12px;
+	background: rgba(8, 8, 8, 0.75);
+	border-radius: 4px;
+	color: #fff;
+	font-family: "YouTube Noto", Roboto, Arial, Helvetica, sans-serif;
+	font-size: 1.3em;
+	line-height: 1.4;
+	text-shadow:
+		0 0 2px rgba(0, 0, 0, 0.9),
+		0 0 4px rgba(0, 0, 0, 0.9);
+	white-space: pre-wrap;
+	word-break: break-word;
+}
+
+/* 翻译失败提示行，弱化成警示色，避免和正常译文混淆。 */
+.yte-subtitle-translation.yte-subtitle-error {
+	color: #ffd166;
+	font-size: 1em;
+}
+
+/* 控制栏翻译按钮：一个「译」字，绝对定位钉死在按钮盒正中心，激活态用
+   YouTube 品牌蓝（与 CC 字幕按钮选中态一致）。不再用 SVG——按钮盒尺寸
+   不受我们控制，SVG 反复出现缩放错位；文字方案最稳。 */
+.ytp-button.yte-subtitle-btn {
+	opacity: 0.9;
+	/* 与原生 ytp-button 同规格的对称圆形按钮盒：固定宽高、零内边距、
+	   零偏移外边距（此前 +64px 已按用户要求回退） */
+	position: relative;
+	width: 48px;
+	min-width: 48px;
+	height: 48px;
+	padding: 0;
+	margin: 0 2px;
+	box-sizing: border-box;
+	/* 字形绝对定位居中，不依赖按钮内部任何布局模式 */
+	text-align: center;
+}
+.yte-subtitle-btn-glyph {
+	position: absolute;
+	left: 50%;
+	top: 50%;
+	transform: translate(-50%, -50%);
+	font-size: 18px;
+	font-weight: 700;
+	line-height: 1;
+	font-family: "YouTube Noto", "Microsoft YaHei", sans-serif;
+	text-shadow: 0 0 2px rgba(0, 0, 0, 0.8);
+	pointer-events: none;
+}
+.ytp-button.yte-subtitle-btn:hover {
+	opacity: 1;
+}
+.ytp-button.yte-subtitle-btn-active {
+	color: #3ea6ff;
+	opacity: 1;
+}

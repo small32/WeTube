@@ -294,6 +294,34 @@
   background: rgba(0, 0, 0, 0.08);
 }
 
+  /* 视口原生滚动条从窗口最顶上开始，会顶进标题栏那一行（出现在 X 按钮右侧）。
+   * Chromium 的根滚动条位置 DOM 移不动，所以直接接管：隐藏根滚动条（只影响
+   * 视口这一条，YouTube 页内容器——评论区、下拉等——的滚动条不受影响），
+   * 在标题栏下方画一条自己的，行为对齐 Windows 惯例。
+   * ⚠️ WebView2 默认启用 Fluent 覆盖式滚动条，::-webkit-scrollbar 定制会被
+   * Chromium 整体忽略，必须用标准属性 scrollbar-width 才藏得掉。 */
+  html {
+    scrollbar-width: none;
+  }
+  html::-webkit-scrollbar { width: 0; height: 0; }
+  #wetube-scrollbar {
+    position: fixed;
+    top: ${BAR_HEIGHT}px;
+    right: 0; bottom: 0;
+    width: 12px;
+    /* 比设置面板（2147483001）低，面板从右侧滑出时盖住它；比 YouTube 内容高。 */
+    z-index: 2147482999;
+    background: #f1f1f1;
+    border-left: 1px solid rgba(0, 0, 0, 0.12);
+  }
+  #wetube-scrollbar .wetube-scrollbar-thumb {
+    width: 100%;
+    height: 24px;
+    background: #c1c1c1;
+  }
+  #wetube-scrollbar .wetube-scrollbar-thumb:hover { background: #a8a8a8; }
+  #wetube-scrollbar .wetube-scrollbar-thumb:active { background: #787878; }
+
 @media (prefers-color-scheme: dark) {
   #wetube-chrome {
     color: #f1f1f1;
@@ -313,8 +341,98 @@
   #wetube-chrome .wetube-menu-pop .item:hover { background: rgba(255, 255, 255, 0.08); }
   #wetube-chrome .wetube-menu-pop .item .accel { color: #999; }
   #wetube-chrome .wetube-menu-pop .sep { background: rgba(255, 255, 255, 0.1); }
+
+  #wetube-scrollbar {
+    background: #202020;
+    border-left-color: rgba(255, 255, 255, 0.12);
+  }
+  #wetube-scrollbar .wetube-scrollbar-thumb { background: #4d4d4d; }
+  #wetube-scrollbar .wetube-scrollbar-thumb:hover { background: #6b6b6b; }
+  #wetube-scrollbar .wetube-scrollbar-thumb:active { background: #8a8a8a; }
 }
 `;
+
+  /* 替代视口原生滚动条：从标题栏下方开始（原生那条会顶进 X 按钮那一行）。
+   * 滚轮 / 触摸板 / 键盘滚动仍由页面原生处理，这里只补可视部分：
+   *   - thumb 位置随滚动同步（scroll + resize + 内容高度变化都监听）；
+   *   - thumb 可拖拽，点轨道按 Windows 惯例翻页；
+   *   - 页面不够长时不显示；全屏藏 chrome 时一起藏（ui.js 驱动）。 */
+  function mountScrollbar() {
+    if (document.getElementById("wetube-scrollbar")) return;
+
+    const bar = document.createElement("div");
+    bar.id = "wetube-scrollbar";
+    const thumb = document.createElement("div");
+    thumb.className = "wetube-scrollbar-thumb";
+    bar.appendChild(thumb);
+    (document.body || document.documentElement).appendChild(bar);
+
+    const scroller = () => document.scrollingElement || document.documentElement;
+    let chromeVisible = true;
+    let dragging = false;
+
+    function update() {
+      const el = scroller();
+      const scrollable = el && el.scrollHeight > el.clientHeight + 1;
+      const show = chromeVisible && scrollable;
+      bar.style.display = show ? "block" : "none";
+      if (!show) return;
+      const track = bar.clientHeight;
+      const thumbH = Math.max(24, Math.round(track * (el.clientHeight / el.scrollHeight)));
+      const maxScroll = el.scrollHeight - el.clientHeight;
+      const y = maxScroll > 0 ? (el.scrollTop / maxScroll) * (track - thumbH) : 0;
+      thumb.style.height = thumbH + "px";
+      thumb.style.transform = `translateY(${y}px)`;
+    }
+
+    window.addEventListener("scroll", update, { passive: true });
+    window.addEventListener("resize", update);
+    /* feed 无限加载、SPA 换页都会改内容高度：盯住根节点尺寸。 */
+    if (typeof ResizeObserver === "function") {
+      const ro = new ResizeObserver(update);
+      if (document.documentElement) ro.observe(document.documentElement);
+      if (document.body) ro.observe(document.body);
+    }
+    window.addEventListener("yt-navigate-finish", () => requestAnimationFrame(update), true);
+
+    /* 拖 thumb：按位移比例换算成 scrollTop。 */
+    thumb.addEventListener("mousedown", (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      const el = scroller();
+      const startY = ev.screenY;
+      const startTop = el.scrollTop;
+      const travel = Math.max(1, bar.clientHeight - thumb.clientHeight);
+      const scale = (el.scrollHeight - el.clientHeight) / travel;
+      const onMove = (mv) => {
+        el.scrollTop = startTop + (mv.screenY - startY) * scale;
+      };
+      const onUp = () => {
+        window.removeEventListener("mousemove", onMove, true);
+        window.removeEventListener("mouseup", onUp, true);
+        setTimeout(() => { dragging = false; }, 0);
+      };
+      dragging = true;
+      window.addEventListener("mousemove", onMove, true);
+      window.addEventListener("mouseup", onUp, true);
+    });
+
+    /* 点轨道 = 翻页（Windows 惯例）：点 thumb 上方向上翻一屏，下方向下翻。 */
+    bar.addEventListener("mousedown", (ev) => {
+      if (ev.target === thumb || dragging) return;
+      const el = scroller();
+      const rect = thumb.getBoundingClientRect();
+      const step = el.clientHeight * 0.9;
+      el.scrollBy({ top: ev.clientY < rect.top ? -step : step, behavior: "smooth" });
+    });
+
+    /* 全屏时 Rust 侧藏 chrome（ui.js 的 __wetubeSetChromeVisible）顺带通知这里。 */
+    window.__wetubeScrollbarSyncVisible = (visible) => {
+      chromeVisible = visible;
+      update();
+    };
+    update();
+  }
 
   function mount() {
     if (document.getElementById("wetube-chrome")) return;
@@ -533,6 +651,8 @@
       // 都以 #wetube-chrome 为作用域。追加到 body 会让弹层变成无样式的普通 div。
       chromeEl.appendChild(pop);
     }
+
+    mountScrollbar();
   }
 
   /* macOS 上整条 HTML chrome 都不渲染：菜单由系统菜单栏提供，窗口控制由原生

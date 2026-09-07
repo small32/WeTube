@@ -249,6 +249,8 @@
     const wantHidden = !visible;
     if (hidden === wantHidden) return;
     bar.style.display = wantHidden ? "none" : "";
+    // 自定义滚动条（titlebar.js）跟 chrome 同进退：全屏藏、退出全屏恢复。
+    window.__wetubeScrollbarSyncVisible?.(visible);
     applyShift(visible && isYouTube());
   };
 
