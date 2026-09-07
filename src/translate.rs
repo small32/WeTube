@@ -119,26 +119,60 @@ fn parse_edge_batch_response(body: &str, expect_len: usize) -> Vec<Option<String
     results
 }
 
-/// 翻译链路日志（唯一入口，main 与本模块共用）：追加写在
-/// %TEMP%\\WeTube-translate.log，release 也落盘——这次排查"批量全败但零错误
+/// 日志大小上限：64 MiB（按 1024 进位）。超了就清空从头写——字幕是持续送翻的，
+/// 一条长视频就能刷出几万行，不限量的话迟早把磁盘吃掉。
+const LOG_MAX_BYTES: u64 = 64 * 1024 * 1024;
+
+/// 翻译链路日志（唯一入口，main 与本模块共用）：追加写在应用数据目录下的
+/// `WeTube/translate.log`，release 也落盘——这次排查"批量全败但零错误
 /// 记录"的教训：诊断日志不能只在 debug 下生效。
+///
+/// 路径跟 `config::config_path()` 同源：macOS `~/Library/Application Support/WeTube/`，
+/// Windows `%APPDATA%\WeTube\`。
+///
+/// ⚠️ 别改成读 `TEMP` 环境变量 + 硬编码反斜杠：macOS 没有 `TEMP`，那样日志会
+/// 静默消失，翻译失败时无从查起——这个坑踩过一次。跨平台取路径一律走 `dirs`。
 pub fn translate_log(message: &str) {
     #[cfg(debug_assertions)]
     eprintln!("[WeTube][translate] {message}");
-    let Ok(path) = std::env::var("TEMP") else { return };
+
+    // data_dir 在两个平台都指向应用数据目录，不需要分平台写 cfg；
+    // 目录可能还没建（配置要先改动才落盘），这里兜一下。
+    let Some(dir) = dirs::data_dir().map(|base| base.join("WeTube")) else {
+        return;
+    };
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
     let Ok(mut file) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(format!("{path}\\WeTube-translate.log"))
+        .open(dir.join("translate.log"))
     else {
         return;
     };
     use std::io::Write as _;
+
+    // 超限就清空重来。并发下可能出现"线程 A 刚写完、线程 B 判定超限清掉"——
+    // 诊断日志而已，不值得为它加锁，丢几行不影响翻译本身。
+    if file
+        .metadata()
+        .map(|meta| meta.len() > LOG_MAX_BYTES)
+        .unwrap_or(false)
+    {
+        let _ = file.set_len(0);
+    }
+
     let epoch = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let _ = writeln!(file, "[{epoch}] {message}");
+
+    // ⚠️ 必须拼成整行后一次 write_all，别用 writeln!：它会把格式串拆成多次
+    // write() 系统调用，而每个翻译批次是独立线程（main.rs 的 thread::spawn），
+    // 并发追加时多次 write 之间会被别的线程插队，日志行会交错写坏
+    // （实测 12 个批次里有 2 行时间戳被吃掉）。单次 write 在 O_APPEND 下是原子的。
+    let _ = file.write_all(format!("[{epoch}] {message}\n").as_bytes());
 }
 
 /// Edge 翻译接口会校验客户端浏览器版本（缺 UA 直接 400
