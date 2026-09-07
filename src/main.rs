@@ -116,7 +116,8 @@ fn log_err(message: &str) {
     eprintln!("[WeTube] {message}");
 }
 
-/// 翻译链路日志统一由 translate 模块提供（写入 %TEMP%\\WeTube-translate.log）。
+/// 翻译链路日志统一由 translate 模块提供（写入应用数据目录下的 WeTube/translate.log，
+/// 路径跨平台，详见 translate::translate_log）。
 use translate::translate_log;
 
 fn main() -> Result<(), Box<dyn Error>> {
