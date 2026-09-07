@@ -3,9 +3,6 @@ name = "WeTube"
 version = "2.0.1"
 edition = "2024"
 description = "WeTube：一个同时支持 macOS 与 Windows 的 YouTube 桌面端App（内建 YouTube-Enhancer）"
-# 字幕翻译模块移植自 read-frog (https://github.com/mengxi-ream/read-frog)，该项目为 GPL-3.0。
-# 按 GPL-3.0 的传染性，本仓库一旦分发，整体需以 GPL-3.0 开源，故此处同步改为 GPL-3.0。
-# 若后续改为自行实现（不复用其代码），或取得商业授权，可改回 MIT。
 license = "GPL-3.0"
 repository = "http://small32.top:8418/winc0/WeTube"
 readme = "README.md"

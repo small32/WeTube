@@ -3,7 +3,7 @@
 WeTube 是一个用 Rust 写的 YouTube 桌面端App：一个装 youtube.com 的 `WKWebView` /
 `WebView2`，加后退 / 前进 / 刷新三个按钮（以及更多），同时支持 macOS 和 Windows，
 并把 [YouTube-Enhancer](https://github.com/YouTube-Enhancer/extension)
-扩展的功能直接内建进了程序——不是让你去装扩展，是程序自带。目前内置 **41 个功能、77 个可调节项**。
+扩展的功能直接内建进了程序——不是让你去装扩展，是程序自带。目前内置 **42 个功能、81 个可调节项**。
 
 | 平台   | 网页内核                    | 说明                                   |
 | ------ | --------------------------- | -------------------------------------- |
@@ -18,6 +18,7 @@ WeTube 是一个用 Rust 写的 YouTube 桌面端App：一个装 youtube.com 的
 - `open` — 用系统默认浏览器打开外链
 - `dark-light` — 启动时读取系统深浅色，避免白屏闪烁
 - `serde_json` / `dirs` — 增强功能的配置持久化
+- `minreq` — 字幕翻译的 HTTP 客户端（同步，走系统 TLS，不引入异步运行时）
 
 ## 内建的 YouTube-Enhancer
 
@@ -27,7 +28,7 @@ WeTube 是一个用 Rust 写的 YouTube 桌面端App：一个装 youtube.com 的
 
 点工具栏最右边的齿轮（或按 `Cmd/Ctrl + ,`）打开设置面板：
 
-- **77 个可调节项全部自动生成**，加一项只需要改 `src/enhancer/schema.json` 一处
+- **81 个可调节项全部自动生成**，加一项只需要改 `src/enhancer/schema.json` 一处
 - 按内容过滤 / 播放器 / 按钮 / Shorts / 播放列表 / 外观 / 高级分成 7 组，支持搜索
 - 改动即时生效，自动存盘
 
@@ -38,7 +39,34 @@ WeTube 是一个用 Rust 写的 YouTube 桌面端App：一个装 youtube.com 的
 | macOS   | `~/Library/Application Support/WeTube/settings.json` |
 | Windows | `%APPDATA%\WeTube\settings.json`                 |
 
-**进度**：41 个功能条目全部已实现，设置面板里每一项都能正常生效。
+**进度**：42 个功能条目全部已实现，设置面板里每一项都能正常生效。
+
+## 字幕双语翻译
+
+设置面板 → **播放器** 分组最上方，默认开启，目标语言默认简体中文。打开视频后播放器
+控制栏会多一个「译」按钮，点一下把 YouTube 原生字幕实时翻成目标语言，译文排在原文下方。
+
+| 可调项         | 说明                                                   |
+| -------------- | ------------------------------------------------------ |
+| 显示翻译按钮   | 默认开                                                 |
+| 目标语言       | 简中 / 繁中 / 英 / 日 / 韩 / 法 / 德 / 西 / 俄，共 9 种 |
+| 只显示译文     | 用译文替换原文，默认关                                 |
+| 字幕字号       | 小 / 标准 / 大 / 特大 / 超大                           |
+
+顺带在「内容过滤」分组加了「隐藏翻译评论按钮」（默认关），用来去掉评论下方的
+「翻译」按钮——它跟字幕翻译是两回事，容易混。
+
+### 翻译日志
+
+排障时看这里（跟设置文件同一个目录）：
+
+| 平台    | 路径                                                     |
+| ------- | -------------------------------------------------------- |
+| macOS   | `~/Library/Application Support/WeTube/translate.log`     |
+| Windows | `%APPDATA%\WeTube\translate.log`                        |
+
+每行形如 `[1788763825] batch-done id=7 ok=30/30`，超过 64 MiB 自动清空重来。
+release 版也写——之前排查「批量全败但零错误记录」的教训就是诊断日志不能只在 debug 下生效。
 
 ## 相比原版多了什么
 
@@ -57,6 +85,12 @@ WeTube 是一个用 Rust 写的 YouTube 桌面端App：一个装 youtube.com 的
   WebKit 会拒绝 `requestFullscreen()`；用 CSS 兜底的方案试过，副作用太多，已回退。
 - **外链不乱跑**：`target="_blank"` 和 `window.open` 一律交给系统默认浏览器，
   不会把整个壳子带走到别的网站
+- **自定义滚动条（Windows）**：WebView2 默认启用 Fluent 覆盖式滚动条，
+  `::-webkit-scrollbar` 那一套会被整体忽略，只能用 `scrollbar-width: none` 藏。
+  所以视口原生滚动条隐藏后，在标题栏下方自绘了一条 Windows 风格的：支持拖拽、
+  点轨道翻页、跟随深色模式、全屏时自动隐藏
+- **字幕双语翻译**：播放器控制栏注入「译」按钮，实时把字幕翻成 9 种语言之一，
+  详见上面的「字幕双语翻译」
 - **窗口标题跟着视频走**：显示成「视频标题 — WeTube」
 - **Windows 图标**：`build.rs` 会把 `icons/app.ico` 嵌进 exe
 
@@ -136,37 +170,6 @@ muda 没给它 `set_accelerator`。它们走的是系统 responder 链——焦�
 `Mod` 是平台主键（macOS 的 Command / Windows 的 Control），主键用 `Code` 的
 Debug 名，跟 JS 的 `KeyboardEvent.code` 一致。
 
-## 项目结构
-
-```
-src/main.rs              窗口、webview、菜单、IPC、配置落盘
-src/config.rs            读 schema → 默认值 + 用户覆盖 → 持久化（含单元测试）
-src/shortcuts.rs         可自定义快捷键的注册表 + spec 解析/序列化（含单元测试）
-src/titlebar.js          自定义窗口 chrome（工具栏 + 菜单条 + 窗口控制）
-                         注：macOS 上不渲染，见上文「构建」
-src/ui.js                YouTube 内容下推避让 + 页面内快捷键分发（按注册表）
-src/shortcut-panel.js    快捷键设置面板
-src/enhancer/
-  schema.json            135 个配置项的单一数据源（Rust 与 JS 共用）
-  runtime.js             配置读写、事件命名空间、元素等待、播放器封装、SPA 重放
-  features.js            功能实现（每个功能一个 enable/disable 对）
-  panel.js               按 schema 自动生成的悬浮设置面板
-  styles.css             功能 CSS（从原扩展 18 份 index.css 合并，已展开嵌套语法）
-  deepdark-presets.js    32 套 DeepDark 配色（由原仓库 TS 自动生成，勿手改）
-  deepdark-material.css  DeepDark 主题主体，3989 行
-build.rs                 打包注入脚本、CSS 转 JS 常量、Windows 图标资源
-scripts/
-  build-macos-app.sh     macOS 构建并打包成 .app
-  make-icons.py          从源 ico 生成 app.ico 与 AppIcon.iconset
-  verify-platform-ui.js  三平台 UI 差异校验（jsdom，改完前端跑一遍）
-  verify-shortcuts.js    快捷键面板功能验证（jsdom，20 项断言）
-  verify-fullscreen.js   全屏联动验证（jsdom，7 项断言）
-icons/
-  source.ico             源图标
-  app.ico                Windows 嵌入用
-  AppIcon.iconset/*.png  macOS iconset
-```
-
 ## 已知限制
 
 - 工具栏的「内容下推」是针对 YouTube 当前 DOM（`#masthead-container` 等）写的 CSS，
@@ -177,3 +180,10 @@ icons/
   （`getVideoData` / `setPlaybackQualityRange` 等）。这些是 YouTube 的私有实现，
   改版就可能失效——原扩展也一样。凡是依赖内部 API 的地方都做了能力探测，
   拿不到就静默降级，不会让整个功能崩掉。
+- 字幕翻译依赖公共翻译端点（微软 Edge，Google 兜底），需要能联网。共享出口 IP
+  有被限流的可能，失败时只是不显示译文，字幕原文不受影响。译文是机器翻译，
+  专有名词和口语会翻得比较生硬。
+
+## 许可证
+
+GPL-3.0
