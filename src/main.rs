@@ -647,15 +647,28 @@ fn act(webview: &WebView, window: &Window, action: &str) {
                 "播放器上报 entering={entering}，当前窗口全屏={}",
                 window.fullscreen().is_some()
             ));
-            window.set_fullscreen(if entering {
-                Some(Fullscreen::Borderless(None))
-            } else {
-                None
-            });
-            eval(
-                webview,
-                &format!("window.__wetubeSetChromeVisible?.({})", !entering),
-            );
+            // macOS：WKWebView 的元素全屏由 WebKit 自己的专用全屏窗口接管
+            // （wry 恒开 setElementFullscreenEnabled，见 WKFullScreenWindowController：
+            // 视图被整体搬进 borderless 的 WebCoreFullScreenWindow 铺满屏幕），
+            // 跟 Safari 里视频全屏同一机制，宿主窗口本就不需要动。这里若再
+            // set_fullscreen 会触发原生全屏的 Space 切换，把 WebKit 的元素全屏
+            // 中途打断——元素全屏被迫退出、player-fullscreen:off 又把窗口还原，
+            // 表现就是「点播放器全屏后刚放大又自动弹回」。所以 macOS 上窗口不动。
+            //
+            // Windows：WebView2 的元素全屏只铺满 WebView 自身区域，必须把窗口
+            // 也切到全屏视频才能真正铺满；chrome 显隐也走这条链路同步。
+            #[cfg(not(target_os = "macos"))]
+            {
+                window.set_fullscreen(if entering {
+                    Some(Fullscreen::Borderless(None))
+                } else {
+                    None
+                });
+                eval(
+                    webview,
+                    &format!("window.__wetubeSetChromeVisible?.({})", !entering),
+                );
+            }
         }
         // 窗口控制（被自定义标题栏调用，macOS 上通常不会到这里）。
         "window-minimize" => window.set_minimized(true),

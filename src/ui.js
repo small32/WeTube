@@ -262,20 +262,18 @@
     return bar.style.display !== "none";
   };
 
-  // ---- 全屏联动（单向：播放器 → 窗口）----
+  // ---- 全屏联动（单向：播放器 → 窗口，仅 Windows 生效）----
   //
-  // 只做这一个方向：点播放器自己的全屏按钮时，让 App 窗口也跟着全屏，
-  // 退出时窗口跟着还原。
+  // 点播放器自己的全屏按钮时把元素全屏状态上报给 Rust（fullscreenchange → IPC）。
+  // Windows：WebView2 的元素全屏只铺满 WebView 自身区域，Rust 侧收到后把窗口
+  // 也切到全屏，视频才真正铺满。
+  // macOS：Rust 侧收到后不做任何事——WKWebView 的元素全屏由 WebKit 自己的
+  // 专用全屏窗口接管（同 Safari），宿主窗口不能跟着动，否则原生全屏的
+  // Space 切换会把元素全屏打断，出现「刚全屏又自动退回」。
   //
-  // 反方向（菜单 / 快捷键 → 播放器）**不做**，原因：
-  // 从菜单或快捷键进全屏时我们是 Rust 侧的合成调用，拿不到用户激活
-  // （user activation），WebKit 会直接拒绝 requestFullscreen()。
-  // 曾经试过用 CSS 把播放器铺满来兜底，但那套依赖 YouTube 的 DOM 结构和
-  // 页面状态，接连出了好几个副作用（铺满不生效、首页滚动被锁死），
-  // 权衡下来不值得——所以退回单向。
-  //
-  // 实际影响：按 F11 / 菜单全屏时，窗口铺满但视频仍是页面里的常规尺寸，
-  // 再点一下播放器的全屏按钮即可。
+  // 反方向（菜单 / 快捷键 → 播放器）不做：从菜单或快捷键进全屏时是 Rust 侧的
+  // 合成调用，拿不到用户激活（user activation），WebKit 会直接拒绝
+  // requestFullscreen()。
   const syncPlayerFullscreen = () => {
     const fsEl = document.fullscreenElement || document.webkitFullscreenElement;
     send(fsEl ? "player-fullscreen:on" : "player-fullscreen:off");
