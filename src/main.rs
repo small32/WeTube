@@ -14,7 +14,8 @@
 
 use std::collections::HashMap;
 use std::error::Error;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -35,6 +36,7 @@ use wry::{
 use muda::MenuEvent;
 
 mod config;
+mod download;
 mod shortcuts;
 mod translate;
 use config::ConfigStore;
@@ -70,6 +72,8 @@ const ENHANCER_JS: &str = include_str!(concat!(env!("OUT_DIR"), "/enhancer-bundl
 /// 功能 CSS 与深黑主题，由 build.rs 转成 JS 字符串常量。
 const ENHANCER_ASSETS_JS: &str = include_str!(concat!(env!("OUT_DIR"), "/enhancer-assets.js"));
 const SHORTCUT_PANEL_JS: &str = include_str!("shortcut-panel.js");
+/// 下载面板：悬浮球 + 格式选择 + 进度显示（两平台通用，见 download-panel.js）。
+const DOWNLOAD_PANEL_JS: &str = include_str!("download-panel.js");
 /// 32 套 DeepDark 配色预设。
 const DEEPDARK_PRESETS_JS: &str = include_str!("enhancer/deepdark-presets.js");
 
@@ -95,6 +99,9 @@ enum Command {
         id: String,
         results: Vec<Option<String>>,
     },
+    /// 下载相关事件：探测结果 / 进度 / 结束。负载是构造好的 JSON，
+    /// 主线程直接 eval 给页面（`window.__wetubeDownloadEvent(payload)`）。
+    DownloadEvent(Value),
 }
 
 /// 把编译期嵌入的图标字节装成 tao::Icon。任何一步失败（图标文件缺失、PNG 解码异常等）
@@ -254,6 +261,18 @@ fn main() -> Result<(), Box<dyn Error>> {
                     ),
                     _ => act(&webview, &window, &msg),
                 }
+            }
+            Event::UserEvent(Command::DownloadEvent(event)) => {
+                // 下载事件统一从这里 eval 给页面；serde_json 保证生成的
+                // 是合法 JS 字面量，路径里有什么怪字符都不会破坏语法。
+                eval(
+                    &webview,
+                    &format!(
+                        "window.__wetubeDownloadEvent?.({})",
+                        serde_json::to_string(&event)
+                            .unwrap_or_else(|_| "{\"kind\":\"fail\"}".into())
+                    ),
+                );
             }
             // 后台线程翻译完，结果回到主线程——只有这里能碰 webview。
             Event::UserEvent(Command::SubtitleTranslated { id, result }) => {
@@ -447,6 +466,117 @@ fn handle_panel_message(
             match payload.get("id").and_then(Value::as_str) {
                 Some(id) => apply_shortcut(store, webview, menu_items, id, None),
                 None => reset_all_shortcuts(store, webview, menu_items),
+            }
+        }
+        // ---- 下载：探测 / 启动 / 取消 ----
+        //
+        // 与字幕翻译同一个套路：网络+子进程的活儿全部丢后台线程，
+        // 结果经 proxy 送回主线程再 eval，绝不卡事件循环。
+        Some("download:probe") => {
+            let Some(url) = payload.get("url").and_then(Value::as_str) else {
+                return;
+            };
+            let url = url.to_string();
+            let proxy = proxy.clone();
+            let _ = proxy.send_event(Command::DownloadEvent(serde_json::json!({
+                "kind": "probe-start", "url": url,
+            })));
+            std::thread::spawn(move || {
+                let event = match download::probe(&url) {
+                    Ok(mut info) => {
+                        info["kind"] = "probe-ok".into();
+                        info["url"] = url.clone().into();
+                        info
+                    }
+                    Err(err) => serde_json::json!({ "kind": "probe-fail", "url": url, "error": err }),
+                };
+                if let Err(err) = proxy.send_event(Command::DownloadEvent(event)) {
+                    log_err(&format!("回传探测结果失败: {err}"));
+                }
+            });
+        }
+        Some("download:start") => {
+            let (Some(url), Some(mode)) = (
+                payload.get("url").and_then(Value::as_str),
+                payload.get("mode").and_then(Value::as_str),
+            ) else {
+                return;
+            };
+            let format_id = payload
+                .get("formatId")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let url = url.to_string();
+            let mode = mode.to_string();
+            // 输出目录：默认 ~/Downloads/WeTube；页面可以指定，但只在
+            // 白名单根（家目录）之下才接受，防面面俱到的注入。
+            let out_dir = match payload.get("outDir").and_then(Value::as_str) {
+                Some(dir) if dirs::home_dir().is_some_and(|home| Path::new(dir).starts_with(&home)) => {
+                    PathBuf::from(dir)
+                }
+                _ => dirs::home_dir()
+                    .unwrap_or_else(|| PathBuf::from("."))
+                    .join("Downloads/WeTube"),
+            };
+            let proxy = proxy.clone();
+            // 下载任务 id 在 download::start 内部才分配，而进度回调构造在它
+            // 之前——用一个可写的槽位中转：闭包每次触发时读最新值。
+            let id_slot = std::sync::Arc::new(AtomicU32::new(0));
+            match download::start(
+                &url,
+                &mode,
+                &format_id,
+                &out_dir,
+                // 进度回调：包装上任务标识送回主线程
+                {
+                    let proxy = proxy.clone();
+                    let id_slot = id_slot.clone();
+                    move |progress| {
+                        let _ = proxy.send_event(Command::DownloadEvent(
+                            serde_json::json!({
+                                "kind": "progress",
+                                "id": id_slot.load(Ordering::Relaxed),
+                                "progress": progress,
+                            }),
+                        ));
+                    }
+                },
+                {
+                    let proxy = proxy.clone();
+                    let id_slot = id_slot.clone();
+                    move |ok, detail| {
+                        let kind = if ok { "done" } else { "fail" };
+                        let _ = proxy.send_event(Command::DownloadEvent(
+                            serde_json::json!({
+                                "kind": kind,
+                                "id": id_slot.load(Ordering::Relaxed),
+                                "detail": detail,
+                            }),
+                        ));
+                    }
+                },
+            ) {
+                Ok(id) => {
+                    // 现在才有真 id：写进槽位，之后触发的回调都带对
+                    id_slot.store(id, Ordering::Relaxed);
+                    let _ = proxy.send_event(Command::DownloadEvent(
+                        serde_json::json!({ "kind": "started", "id": id, "url": url, "mode": mode }),
+                    ));
+                }
+                Err(err) => {
+                    let _ = proxy.send_event(Command::DownloadEvent(
+                        serde_json::json!({ "kind": "fail", "id": 0, "detail": err }),
+                    ));
+                }
+            }
+        }
+        Some("download:cancel") => {
+            if let Some(id) = payload.get("id").and_then(Value::as_u64) {
+                let killed = download::cancel(id as u32);
+                let _ = proxy.send_event(Command::DownloadEvent(
+                    serde_json::json!({ "kind": "cancelled", "id": id, "killed": killed }),
+                ));
             }
         }
         _ => {}
@@ -717,7 +847,8 @@ fn init_script(store: &ConfigStore) -> String {
          {titlebar}\n\
          {toolbar}\n\
          {enhancer}\n\
-         {shortcut_panel}\n",
+         {shortcut_panel}\n\
+         {download_panel}\n",
         schema = js_literal(store.schema()),
         config = js_literal(&store.full_config().to_string()),
         platform = PLATFORM,
@@ -728,6 +859,7 @@ fn init_script(store: &ConfigStore) -> String {
         toolbar = TOOLBAR_JS,
         enhancer = ENHANCER_JS,
         shortcut_panel = SHORTCUT_PANEL_JS,
+        download_panel = DOWNLOAD_PANEL_JS,
     )
 }
 
