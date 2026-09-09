@@ -35,6 +35,11 @@
       "id": "advanced",
       "label": "高级",
       "desc": "自定义 CSS、链接处理等"
+    },
+    {
+      "id": "download",
+      "label": "下载",
+      "desc": "视频/音频下载行为与保存位置"
     }
   ],
   "features": [
@@ -1161,6 +1166,28 @@
           "step": 1,
           "label": "边距 (px)",
           "parent": "enabled"
+        }
+      ]
+    },
+    {
+      "id": "downloadSettings",
+      "label": "下载设置",
+      "desc": "悬浮球只在视频播放页显示；留空文件夹路径时用默认位置（macOS：~/Downloads/WeTube，Windows：系统下载文件夹\\WeTube）",
+      "group": "download",
+      "fields": [
+        {
+          "key": "enabled",
+          "type": "boolean",
+          "default": true,
+          "label": "启用下载功能"
+        },
+        {
+          "key": "folder",
+          "type": "text",
+          "default": "",
+          "label": "下载文件夹",
+          "placeholder": "留空使用默认位置",
+          "hint": "手动指定保存目录，留空时 macOS 存到 ~/Downloads/WeTube，Windows 存到系统下载文件夹\\WeTube"
         }
       ]
     }

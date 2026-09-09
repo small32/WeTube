@@ -78,6 +78,47 @@ pub fn cancel(id: u32) -> bool {
     }
 }
 
+/// App 退出时清场：kill 掉所有还在跑的 yt-dlp 子进程。
+///
+/// 子进程是独立于 App 生命周期的，事件循环直接退出的话它们会变成孤儿
+/// 继续在后台下载。在 `Event::LoopDestroyed` 里调用本函数兜底。
+///
+/// 注：SIGKILL 级强杀（活动监视器「强制退出」）时这段代码不会执行，
+/// 残留的 yt-dlp 会把当前任务下完自然退出，不会永久驻留；.part 续传
+/// 机制保证下次下载同一视频时接着传，不算数据损坏。
+pub fn kill_all() {
+    let Ok(mut map) = CHILDREN.lock() else {
+        return;
+    };
+    let running = map.len();
+    for (_, mut child) in map.drain() {
+        if let Err(err) = child.kill() {
+            // 进程已经自己退出的竞态会报「无此进程」，忽略即可
+            log(&format!("退出清理：终止 yt-dlp({}) 失败: {err}", child.id()));
+        }
+    }
+    if running > 0 {
+        log(&format!("退出清理：已终止 {running} 个下载进程"));
+    }
+}
+
+/// SIGTERM 路径的尽力清理：拿不到锁（主线程正持锁的窄窗口）就放弃，
+/// 交给调用方直接退进程。只在信号处理器里用——那里不能阻塞等锁。
+#[cfg(unix)]
+pub fn kill_all_best_effort() {
+    if let Ok(mut map) = CHILDREN.try_lock() {
+        for (_, mut child) in map.drain() {
+            let _ = child.kill();
+        }
+    }
+}
+
+/// download 模块内部用的轻量日志：不依赖 main.rs 的 log_err（避免循环引用），
+/// 直接走 stderr——App 退出路径上多这一行没副作用。
+fn log(message: &str) {
+    eprintln!("[WeTube] {message}");
+}
+
 /// 取全部格式里"画质最好的一档"用到的公共信息——页面上要显示标题、时长、
 /// 缩略图，格式列表只挑关键的几个字段，避免把几十个 itag 全塞给页面。
 fn summarize(info: &Value) -> Value {

@@ -190,6 +190,32 @@
     return "";
   }
 
+  /* 当前是否为视频播放页。悬浮球只在这些页面出现（需求：其他页面不显示）。 */
+  function isVideoPage() {
+    return currentVideoUrl() !== "";
+  }
+
+  /* 下载功能总开关（设置面板 → 下载 → 下载设置）。默认 true，
+   * 没有配置 / 旧配置文件读不到该字段时也当作开启。 */
+  function downloadEnabled() {
+    try {
+      const node = window.__YTE_CONFIG__?.downloadSettings;
+      if (!node || node.enabled === undefined) return true;
+      return node.enabled === true;
+    } catch (e) { return true; }
+  }
+
+  function syncFabVisibility() {
+    const fab = document.getElementById("wetube-dl-fab");
+    if (!fab) return;
+    const show = downloadEnabled() && isVideoPage();
+    fab.style.display = show ? "flex" : "none";
+    // 离开视频页时顺手收起面板，避免下次进来残留旧状态
+    if (!show) {
+      document.getElementById("wetube-dl-panel")?.classList.remove("open");
+    }
+  }
+
   function fmtSize(bytes) {
     if (!bytes || bytes <= 0) return "";
     const units = ["B", "KB", "MB", "GB"];
@@ -294,7 +320,18 @@
         urlInput.focus();
       }
     }
+
+    /* ---- 悬浮球显隐 ----
+     * YouTube 是 SPA：监听导航事件 + 初始检查，只在视频播放页显示悬浮球。
+     * 捕获阶段监听，跟 enhancer/runtime.js 的做法一致。 */
+    window.addEventListener("yt-navigate-finish", syncFabVisibility, true);
+    window.addEventListener("popstate", syncFabVisibility, true);
+    syncFabVisibility();
   }
+
+  /* 设置面板改了 downloadSettings 配置后由 runtime 通知到这里：总开关
+   * 关掉立即隐藏悬浮球，打开则按当前页面类型重新判断。 */
+  window.__wetubeDlSyncSettings = syncFabVisibility;
 
   /* ---- 任务卡片 ---- */
 

@@ -123,11 +123,36 @@ fn log_err(message: &str) {
     eprintln!("[WeTube] {message}");
 }
 
+/// 终止类信号处理器：清掉 yt-dlp 子进程后按信号的默认语义退出。
+///
+/// 处理器里绝不碰 Mutex::lock（可能死锁）、不分配堆内存，只做
+/// try_lock + kill + `_exit`。不恢复默认处理器再 raise 是刻意的：
+/// 再 raise 会重入信号路径，而这里已经完成了唯一目标（杀子进程）。
+#[cfg(unix)]
+extern "C" fn handle_exit_signal(sig: i32) {
+    download::kill_all_best_effort();
+    // _exit 是异步信号安全的立即退出；退出码 128+sig 与 shell 惯例一致。
+    std::process::exit(128 + sig);
+}
+
 /// 翻译链路日志统一由 translate 模块提供（写入应用数据目录下的 WeTube/translate.log，
 /// 路径跨平台，详见 translate::translate_log）。
 use translate::translate_log;
 
 fn main() -> Result<(), Box<dyn Error>> {
+    // SIGTERM/SIGHUP/SIGINT（kill 命令、注销、Ctrl+C）不走事件循环，
+    // 事件循环里的 LoopDestroyed 清场接不到——装个信号处理器把 yt-dlp
+    // 子进程一并带走。信号处理器里只能调异步安全函数，所以 download
+    // 那边给了 try_lock 的尽力清理版本；锁拿不到就随进程去，孤儿
+    // yt-dlp 会把当前任务下完自然退出。
+    #[cfg(unix)]
+    unsafe {
+        let handler = handle_exit_signal as extern "C" fn(i32) as *const () as usize;
+        libc::signal(libc::SIGTERM, handler);
+        libc::signal(libc::SIGHUP, handler);
+        libc::signal(libc::SIGINT, handler);
+    }
+
     let mut store = ConfigStore::load()?;
     let init_script = init_script(&store);
 
@@ -236,6 +261,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                 event: WindowEvent::CloseRequested,
                 ..
             } => *control_flow = ControlFlow::Exit,
+            // 事件循环销毁（Cmd+Q / 关窗口 / 菜单退出都会走到这里）：
+            // 把还在跑的 yt-dlp 下载子进程一并杀掉，别让它们变孤儿继续后台下载。
+            Event::LoopDestroyed => {
+                download::kill_all();
+            }
             Event::UserEvent(Command::Ipc(msg)) => {
                 debug_log(&format!("指令来源: 页面 IPC → {msg:?}"));
                 if let Some(url) = msg.strip_prefix("open:") {
@@ -509,15 +539,30 @@ fn handle_panel_message(
                 .to_string();
             let url = url.to_string();
             let mode = mode.to_string();
-            // 输出目录：默认 ~/Downloads/WeTube；页面可以指定，但只在
-            // 白名单根（家目录）之下才接受，防面面俱到的注入。
+            // 输出目录，按优先级：
+            //   1. 页面显式指定的 outDir（必须在用户家目录之下，防注入）；
+            //   2. 设置面板「下载设置 → 下载文件夹」里手填的绝对路径
+            //      （支持 ~ 开头；前后引号/空白顺手剥掉，Finder 的
+            //      「拷贝为路径名称」带引号也能直接粘）；
+            //   3. 默认：系统下载文件夹下的 WeTube 子目录——macOS 是
+            //      /Users/<用户名>/Downloads/WeTube，Windows 是
+            //      C:\Users\<用户名>\Downloads\WeTube（Known Folder）。
             let out_dir = match payload.get("outDir").and_then(Value::as_str) {
                 Some(dir) if dirs::home_dir().is_some_and(|home| Path::new(dir).starts_with(&home)) => {
                     PathBuf::from(dir)
                 }
-                _ => dirs::home_dir()
-                    .unwrap_or_else(|| PathBuf::from("."))
-                    .join("Downloads/WeTube"),
+                _ => {
+                    let configured = store
+                        .full_config()
+                        .get("downloadSettings")
+                        .and_then(|node| node.get("folder"))
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .map(|s| s.trim_matches('"').trim_matches('\'').trim())
+                        .filter(|s| !s.is_empty())
+                        .and_then(resolve_dir_input);
+                    configured.unwrap_or_else(default_download_dir)
+                }
             };
             let proxy = proxy.clone();
             // 下载任务 id 在 download::start 内部才分配，而进度回调构造在它
@@ -581,6 +626,37 @@ fn handle_panel_message(
         }
         _ => {}
     }
+}
+
+/// 把用户在设置里手填的目录字符串解析成 PathBuf。
+///
+/// 支持 `~` 与 `~/` 开头（展开到家目录）；路径不含 `~` 时按原样使用
+/// （相对路径会被 resolve 成 cwd 下的路径，不算错误，但一般没人这么填）。
+/// 明显不像路径的输入（含空中间段的）直接判无效，回退默认目录。
+fn resolve_dir_input(raw: &str) -> Option<PathBuf> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed == "~" {
+        return dirs::home_dir();
+    }
+    if let Some(rest) = trimmed.strip_prefix("~/").or(trimmed.strip_prefix("~\\")) {
+        return dirs::home_dir().map(|home| home.join(rest));
+    }
+    Some(PathBuf::from(trimmed))
+}
+
+/// 默认下载目录：系统下载文件夹下的 WeTube 子目录。
+///
+/// macOS：~/Downloads/WeTube；Windows：Known Folder "Downloads"（一般是
+/// C:\Users\<用户名>\Downloads）下的 WeTube。拿不到系统下载文件夹时
+/// 兜底到家目录拼 Downloads。
+fn default_download_dir() -> PathBuf {
+    let base = dirs::download_dir()
+        .or_else(|| dirs::home_dir().map(|home| home.join("Downloads")))
+        .unwrap_or_else(|| PathBuf::from("."));
+    base.join("WeTube")
 }
 
 /// 改（或清空）一项快捷键：落盘 → 更新菜单项 → 让页面重绘。

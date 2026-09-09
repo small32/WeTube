@@ -1,6 +1,6 @@
 [package]
 name = "WeTube"
-version = "2.0.2"
+version = "3.0.0"
 edition = "2024"
 description = "WeTube：一个同时支持 macOS 与 Windows 的 YouTube 桌面端App（内建 YouTube-Enhancer）"
 license = "GPL-3.0"
@@ -29,6 +29,11 @@ minreq = { version = "3", default-features = false, features = [
     "https-native-tls",
     "urlencoding",
 ] }
+
+# SIGTERM/SIGHUP/SIGINT 退出兜底要用（间接依赖已在树里，这里只是显式声明）。
+# 仅 Unix：Windows 没有这套信号机制。
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [build-dependencies]
 # 解码 PNG 图标为 RGBA，给 tao::Icon 用。

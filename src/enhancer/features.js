@@ -55,6 +55,14 @@
 	// 注册成空功能只是为了设置面板能把它标成「已实现」。
 	F.onScreenDisplay = { enable: () => {}, disable: () => {} };
 
+	// 下载设置同样没有页面行为：悬浮球/面板逻辑独立在 download-panel.js，
+	// 注册空功能是为了 (1) 设置面板显示「已实现」；(2) 开关切换时 runtime
+	// 会调用 enable/disable，借这个时机通知悬浮球重新按配置显隐。
+	F.downloadSettings = {
+		enable: () => { window.__wetubeDlSyncSettings?.(); },
+		disable: () => { window.__wetubeDlSyncSettings?.(); },
+	};
+
 	const OSD_COLORS = {
 		white: "#ffffff", red: "#ff4444", green: "#44dd44", blue: "#4488ff",
 		yellow: "#ffdd44", orange: "#ff9944", purple: "#aa66ff", pink: "#ff77bb",
