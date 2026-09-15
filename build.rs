@@ -33,6 +33,10 @@ struct BundledTool {
     bytes_const: &'static str,
     /// 生成的版本常量名
     version_const: &'static str,
+    /// 生成的「是否压缩内嵌」常量名
+    packed_const: &'static str,
+    /// 生成的「解压后字节数」常量名
+    size_const: &'static str,
 }
 
 /// 要内嵌的工具清单。新增工具只在这里加一行，download.rs 那边同步处理即可。
@@ -44,18 +48,24 @@ const BUNDLED_TOOLS: [BundledTool; 3] = [
         version_file: "yt-dlp.version",
         bytes_const: "YTDLP_BYTES",
         version_const: "YTDLP_VERSION",
+        packed_const: "YTDLP_PACKED",
+        size_const: "YTDLP_SIZE",
     },
     BundledTool {
         file: "ffmpeg.exe",
         version_file: "ffmpeg.version",
         bytes_const: "FFMPEG_BYTES",
         version_const: "FFMPEG_VERSION",
+        packed_const: "FFMPEG_PACKED",
+        size_const: "FFMPEG_SIZE",
     },
     BundledTool {
         file: "qjs.exe",
         version_file: "qjs.version",
         bytes_const: "DENO_BYTES",
         version_const: "DENO_VERSION",
+        packed_const: "DENO_PACKED",
+        size_const: "DENO_SIZE",
     },
 ];
 
@@ -83,20 +93,35 @@ fn embed_bundled_tools() {
 
     for tool in &BUNDLED_TOOLS {
         let file = vendor.join(tool.file);
+        // 优先内嵌 xz 压缩态（scripts/pack-embedded-tools.py 生成）：
+        // ffmpeg 98MB→26MB，是包体最大的一块。没有 .xz 就内嵌原始字节，
+        // 解出路径统一，只是多占体积。
+        let packed_file = vendor.join(format!("{}.xz", tool.file));
+        let packed = packed_file.is_file();
+        let source = if packed { &packed_file } else { &file };
+
         println!("cargo:rerun-if-changed=vendor/{}", tool.file);
+        println!("cargo:rerun-if-changed=vendor/{}.xz", tool.file);
         println!("cargo:rerun-if-changed=vendor/{}", tool.version_file);
 
-        if file.is_file() {
-            let abs = Path::new(&manifest).join(&file);
+        if source.is_file() {
+            let abs = Path::new(&manifest).join(source);
             let version = fs::read_to_string(vendor.join(tool.version_file))
                 .map(|value| value.trim().to_string())
                 .unwrap_or_default();
+            // 解压后应有的字节数：用于运行时校验解出的文件完整。原始文件不在
+            // （只留了 .xz）时记 0，运行时跳过大小校验。
+            let raw_size = fs::metadata(&file).map(|meta| meta.len()).unwrap_or(0);
             code.push_str(&format!(
-                "pub static {}: &[u8] = include_bytes!(r\"{}\");\npub const {}: &str = \"{}\";\n",
+                "pub static {}: &[u8] = include_bytes!(r\"{}\");\npub const {}: &str = \"{}\";\npub const {}: bool = {};\npub const {}: u64 = {};\n",
                 tool.bytes_const,
                 abs.display(),
                 tool.version_const,
-                version
+                version,
+                tool.packed_const,
+                packed,
+                tool.size_const,
+                raw_size
             ));
         } else {
             println!(
@@ -104,8 +129,8 @@ fn embed_bundled_tools() {
                 tool.file
             );
             code.push_str(&format!(
-                "pub static {}: &[u8] = &[];\npub const {}: &str = \"\";\n",
-                tool.bytes_const, tool.version_const
+                "pub static {}: &[u8] = &[];\npub const {}: &str = \"\";\npub const {}: bool = false;\npub const {}: u64 = 0;\n",
+                tool.bytes_const, tool.version_const, tool.packed_const, tool.size_const
             ));
         }
     }
@@ -119,8 +144,8 @@ fn empty_tools_rs() -> String {
         .iter()
         .map(|tool| {
             format!(
-                "pub static {}: &[u8] = &[];\npub const {}: &str = \"\";\n",
-                tool.bytes_const, tool.version_const
+                "pub static {}: &[u8] = &[];\npub const {}: &str = \"\";\npub const {}: bool = false;\npub const {}: u64 = 0;\n",
+                tool.bytes_const, tool.version_const, tool.packed_const, tool.size_const
             )
         })
         .collect()

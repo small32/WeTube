@@ -1190,6 +1190,28 @@
           "hint": "手动指定保存目录，留空时 macOS 存到 ~/Downloads/WeTube，Windows 存到系统下载文件夹\\WeTube"
         },
         {
+          "key": "cookiesFromBrowser",
+          "type": "select",
+          "default": "自动",
+          "label": "下载用 Cookie 来源",
+          "options": [
+            "自动",
+            "关闭",
+            "chrome",
+            "edge",
+            "firefox"
+          ],
+          "hint": "「自动」用 WeTube 内置浏览器的登录态（你在应用里登录过 YouTube 就够）；选具体浏览器则复用该浏览器的登录，但必须先把浏览器完全退出，否则它会锁住 Cookie 数据库读不到"
+        },
+        {
+          "key": "cookiesFile",
+          "type": "text",
+          "default": "",
+          "label": "cookies.txt 路径",
+          "placeholder": "留空不用",
+          "hint": "填 Netscape 格式 cookies.txt 的完整路径（可用浏览器扩展导出）。填了它就不再从浏览器读，且不受浏览器是否运行影响，最稳"
+        },
+        {
           "key": "concurrency",
           "type": "select",
           "default": "8",

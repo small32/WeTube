@@ -107,11 +107,18 @@ cargo build --release
 # 产物：target/release/WeTube.exe（单文件，含内嵌的 yt-dlp + ffmpeg）
 ```
 
-> **外置工具内嵌**：Windows 版把 `vendor/yt-dlp.exe`（约 17MB）和 `vendor/ffmpeg.exe`
-> （约 98MB）用 `include_bytes!` 编进产物，运行时解到
-> `%LOCALAPPDATA%\WeTube\bin\<工具>-<版本>.exe` 再执行——对外只有一个 exe。
-> 解出后按版本名复用，升级会换新文件并清掉旧副本；没跑 fetch 脚本也能构建，
-> 只是不内嵌，运行时退回 exe 同目录 / PATH 查找。`vendor/` 不入库（见 `.gitignore`）。
+> **外置工具内嵌（压缩态）**：Windows 版把 `vendor/yt-dlp.exe`、`vendor/ffmpeg.exe`
+> 和 `vendor/qjs.exe` 编进产物，运行时解到 `%LOCALAPPDATA%\WeTube\bin\`（文件名保持
+> **规范名** `ffmpeg.exe` / `yt-dlp.exe` / `qjs.exe`）再执行——对外只有一个 exe。
+> **嵌入的是 xz 压缩态**（`scripts/pack-embedded-tools.py` 生成 `.xz`，构建脚本会
+> 自动调用）：ffmpeg 98MB→26MB，整包从 125MB 降到 48MB；解压只做一次，之后按
+> 解压后大小校验复用，升级会换新文件并清掉旧副本。没跑 fetch 脚本也能构建，只是
+> 不内嵌，运行时退回 exe 同目录 / PATH 查找。`vendor/` 不入库（见 `.gitignore`）。
+>
+> ⚠️ 解出的文件名**必须是规范名**：yt-dlp 是被 `--ffmpeg-location` 指到位置后自己
+> 去找 `ffmpeg` 的，名字带了版本号（`ffmpeg-9.0.1.exe`）它就找不到，合并会被静默
+> 跳过——表现为「下载成功但视频没声音」（`--no-warnings` 还会把那条警告吞掉）。
+> 之前用版本号命名踩过这个坑，已由 `tool_file_name_is_canonical` 单测守住。
 >
 > 为什么要 ffmpeg：YouTube 1080p 以上的音视频是**两条分离的流**，下载后必须用
 > ffmpeg 合并成带声音的 MP4；没有它就只能下 ≤720p 的渐进式单文件。

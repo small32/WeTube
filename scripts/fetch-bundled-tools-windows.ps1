@@ -91,6 +91,19 @@ if ((Test-Path $qjs) -and ((Get-Sha256 $qjs) -eq $QjsSha256.ToLower())) {
 }
 Set-Content -Path (Join-Path $vendor "qjs.version") -Value $QjsVersion -NoNewline -Encoding ASCII
 
+# ---- 压缩打包：构建时以 xz 压缩态内嵌进 exe ----
+# ffmpeg 98MB→26MB，占了包里最大的一块；yt-dlp 是 PyInstaller 打的包，内部
+# 已压过，压不动多少。产物是 vendor/<工具>.exe.xz，build.rs 见到 .xz 就内嵌它。
+$packer = Join-Path $PSScriptRoot "pack-embedded-tools.py"
+if (Get-Command python -ErrorAction SilentlyContinue) {
+  Write-Host ""
+  Write-Host "压缩 vendor/ 下的工具："
+  & python $packer
+  if ($LASTEXITCODE -ne 0) { throw "压缩失败（python 退出码 $LASTEXITCODE）" }
+} else {
+  Write-Warning "未找到 python，跳过压缩步骤；构建仍可用，但会内嵌未压缩的工具（包体会大 60MB 左右）"
+}
+
 Write-Host ""
 Write-Host "完成："
 Get-ChildItem $vendor | Select-Object Name, @{n = "MB"; e = { [math]::Round($_.Length / 1MB, 1) } } | Format-Table -AutoSize

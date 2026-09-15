@@ -7,9 +7,22 @@ license = "GPL-3.0"
 repository = "http://small32.top:8418/winc0/WeTube"
 readme = "README.md"
 
+# 导出内置浏览器（WebView2）的 cookie 给 yt-dlp 用。只有 Windows 需要：
+# yt-dlp 读不了被应用自己锁住的 cookie 数据库，只能由应用通过 COM 接口导出。
+# windows 版本必须与 webview2-com 依赖的一致，否则类型对不上。
+[target.'cfg(windows)'.dependencies]
+webview2-com = "0.38"
+# BOOL 由 windows-core 提供（webview2 的 IsSecure 参数就是它的类型）
+windows = { version = "0.61", features = ["Win32_Foundation"] }
+windows-core = "0.61"
+
 [dependencies]
 dark-light = "3.0.0"
 dirs = "6.0.0"
+# 内嵌的外置工具（yt-dlp/ffmpeg/qjs）以 xz 压缩态打包进 exe，运行时解压到
+# 用户数据目录——ffmpeg 从 98MB 压到 26MB，是包里最大的一块。
+# 选纯 Rust 的 lzma-rs 而不是 xz2/liblzma-sys：不用带 C 依赖，交叉编译也省事。
+lzma-rs = "0.3.0"
 muda = "0.19.3"
 open = "5.4.2"
 serde = { version = "1.0.229", features = ["derive"] }

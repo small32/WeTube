@@ -28,14 +28,19 @@ mod bundled {
 /// 内嵌工具解出后的目录缓存，避免每次取路径都碰文件系统。
 static EMBEDDED_TOOLS: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
 
-/// 工具可执行文件名。Windows 带 .exe；版本非空时把版本号也带进文件名——
-/// 升级后自然换新文件，不会误用旧版残留。
-fn tool_file_name(stem: &str, version: &str) -> String {
-    let suffix = if cfg!(windows) { ".exe" } else { "" };
-    if version.is_empty() {
-        format!("{stem}{suffix}")
+/// 工具可执行文件名，必须是**规范名**（`ffmpeg.exe` / `ffmpeg` / `yt-dlp.exe`）。
+///
+/// 这里曾经把版本号也编进文件名（`ffmpeg-9.0.1.exe`），想着"升级后不会误用
+/// 旧副本"，结果踩了坑：yt-dlp 的 `--ffmpeg-location` 指到目录时，它会自己
+/// 去那个目录里找名为 `ffmpeg` 的文件，带版本号的名字它根本不会看一眼——
+/// 于是合并被**静默跳过**，下出来只剩视频没有声音，而且因为 `--no-warnings`
+/// 连警告都被吞了（用户看到的是"下载成功，但没声音"）。
+/// 复用判断改用解压后的大小校验（见 `extract_tool`），同样能识别旧版本残留。
+fn tool_file_name(stem: &str) -> String {
+    if cfg!(windows) {
+        format!("{stem}.exe")
     } else {
-        format!("{stem}-{version}{suffix}")
+        stem.to_string()
     }
 }
 
@@ -48,12 +53,16 @@ fn embedded_dir() -> Option<std::path::PathBuf> {
 
 /// 把一份内嵌字节解到 `dir`，已存在且大小一致就直接复用。
 ///
-/// 先写 `.tmp` 再改名：上次解压中断留下的半截文件不会被误当成完整副本。
+/// 内嵌有两种形态：xz 压缩态（`packed`，包体小很多，ffmpeg 98MB→26MB）和
+/// 原样字节。压缩态走流式解压直接写文件——ffmpeg 解压后近百 MB，不该整块
+/// 进内存。先写 `.tmp` 再改名：上次解压中断留下的半截文件不会被误当成
+/// 完整副本；有原始大小时顺带校验解出结果，防止压缩包损坏被当真。
 fn extract_tool(
     dir: &std::path::Path,
     stem: &str,
     bytes: &[u8],
-    version: &str,
+    packed: bool,
+    expected_size: u64,
 ) -> std::io::Result<std::path::PathBuf> {
     if bytes.is_empty() {
         return Err(std::io::Error::new(
@@ -62,16 +71,41 @@ fn extract_tool(
         ));
     }
     std::fs::create_dir_all(dir)?;
-    let target = dir.join(tool_file_name(stem, version));
-    let complete = std::fs::metadata(&target)
-        .map(|meta| meta.len() == bytes.len() as u64)
-        .unwrap_or(false);
-    if complete {
+    let target = dir.join(tool_file_name(stem));
+
+    if expected_size > 0
+        && std::fs::metadata(&target)
+            .map(|meta| meta.len() == expected_size)
+            .unwrap_or(false)
+    {
+        // 复用时也清理一次：从"带版本号命名"的旧版本升上来会残留几份大文件
+        prune_other_copies(dir, stem, &target);
         return Ok(target);
     }
 
     let tmp = target.with_extension("tmp");
-    std::fs::write(&tmp, bytes)?;
+    {
+        let mut out = std::fs::File::create(&tmp)?;
+        if packed {
+            let mut input = std::io::BufReader::new(bytes);
+            lzma_rs::xz_decompress(&mut input, &mut out)
+                .map_err(|err| std::io::Error::other(format!("解压 {stem} 失败：{err}")))?;
+        } else {
+            std::io::copy(&mut std::io::Cursor::new(bytes), &mut out)?;
+        }
+        out.sync_all()?;
+    }
+
+    if expected_size > 0 {
+        let got = std::fs::metadata(&tmp)?.len();
+        if got != expected_size {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(std::io::Error::other(format!(
+                "解出 {stem} 大小不符：期望 {expected_size} 字节，实际 {got} 字节"
+            )));
+        }
+    }
+
     // Windows 的 rename 不覆盖已存在文件，先删掉那份不完整的旧副本
     let _ = std::fs::remove_file(&target);
     std::fs::rename(&tmp, &target)?;
@@ -105,15 +139,30 @@ fn embedded_tools_dir() -> Option<std::path::PathBuf> {
             let dir = embedded_dir()?;
             let mut ready = false;
             let tools = [
-                ("yt-dlp", bundled::YTDLP_BYTES, bundled::YTDLP_VERSION),
-                ("ffmpeg", bundled::FFMPEG_BYTES, bundled::FFMPEG_VERSION),
-                ("qjs", bundled::DENO_BYTES, bundled::DENO_VERSION),
+                (
+                    "yt-dlp",
+                    bundled::YTDLP_BYTES,
+                    bundled::YTDLP_PACKED,
+                    bundled::YTDLP_SIZE,
+                ),
+                (
+                    "ffmpeg",
+                    bundled::FFMPEG_BYTES,
+                    bundled::FFMPEG_PACKED,
+                    bundled::FFMPEG_SIZE,
+                ),
+                (
+                    "qjs",
+                    bundled::DENO_BYTES,
+                    bundled::DENO_PACKED,
+                    bundled::DENO_SIZE,
+                ),
             ];
-            for (stem, bytes, version) in tools {
+            for (stem, bytes, packed, size) in tools {
                 if bytes.is_empty() {
                     continue;
                 }
-                match extract_tool(&dir, stem, bytes, version) {
+                match extract_tool(&dir, stem, bytes, packed, size) {
                     Ok(_) => ready = true,
                     Err(err) => log(&format!("解出内嵌 {stem} 失败：{err}")),
                 }
@@ -127,7 +176,7 @@ fn embedded_tools_dir() -> Option<std::path::PathBuf> {
 /// 由调用方退回外部查找——内嵌失败不该让下载功能整个不可用。
 fn embedded_ytdlp() -> Option<std::path::PathBuf> {
     let dir = embedded_tools_dir()?;
-    let path = dir.join(tool_file_name("yt-dlp", bundled::YTDLP_VERSION));
+    let path = dir.join(tool_file_name("yt-dlp"));
     path.is_file().then_some(path)
 }
 
@@ -193,25 +242,28 @@ pub fn yt_dlp_path() -> Option<std::path::PathBuf> {
     find_exe(&bundled_dirs(), "yt-dlp").or_else(|| find_exe(&path_dirs(), "yt-dlp"))
 }
 
-/// ffmpeg 所在目录，交给 yt-dlp 的 --ffmpeg-location。
+/// ffmpeg 可执行文件的完整路径，交给 yt-dlp 的 `--ffmpeg-location`。
 ///
-/// 找不到不算错误：没有 ffmpeg 时 yt-dlp 会退到渐进式单文件（一般 ≤720p），
-/// 音频也只能拿原始音轨。但能找到就该用上——合并高画质档必须靠它。
-/// macOS 上 brew 装的 ffmpeg 以前会因为只看 bundle 而被忽略，现在同样认。
-pub fn ffmpeg_dir() -> Option<std::path::PathBuf> {
-    // 1. 内嵌副本所在目录（Windows 单文件分发的主路径）
+/// 传的是**文件本身**而不是所在目录：给目录时 yt-dlp 会自己去里面找名为
+/// `ffmpeg` 的文件，目录里一旦不是这个规范名就找不到（这正是"下载成功但没
+/// 声音"的成因）；给文件路径则直接使用，不依赖它在目录里叫什么。
+/// 注：ffmpeg 缺失不算错误——yt-dlp 会退到渐进式单文件（一般 ≤720p），
+/// 只是拿不到高画质档的合并。macOS 上 brew 装的 ffmpeg 以前因为只看 bundle
+/// 而被忽略，现在同样认。
+pub fn ffmpeg_path() -> Option<std::path::PathBuf> {
+    // 1. 内嵌副本（Windows 单文件分发的主路径）
     if let Some(dir) = embedded_tools_dir() {
-        let ffmpeg = dir.join(tool_file_name("ffmpeg", bundled::FFMPEG_VERSION));
+        let ffmpeg = dir.join(tool_file_name("ffmpeg"));
         if ffmpeg.is_file() {
-            return Some(dir);
+            return Some(ffmpeg);
         }
     }
     // 2. 自带目录（macOS bundle / exe 同目录 / exe 同目录 bin）
     if let Some(path) = find_exe(&bundled_dirs(), "ffmpeg") {
-        return path.parent().map(std::path::Path::to_path_buf);
+        return Some(path);
     }
     // 3. PATH 里装的（winget/scoop/homebrew）同样认
-    find_exe(&path_dirs(), "ffmpeg").and_then(|path| path.parent().map(std::path::Path::to_path_buf))
+    find_exe(&path_dirs(), "ffmpeg")
 }
 
 /// qjs（QuickJS-NG）的位置，交给 yt-dlp 的 --js-runtimes quickjs:<path>。
@@ -235,7 +287,7 @@ pub fn deno_path() -> Option<std::path::PathBuf> {
     }
     // 2. 内嵌副本所在目录（Windows 单文件分发）
     if let Some(dir) = embedded_tools_dir() {
-        let qjs = dir.join(tool_file_name("qjs", bundled::DENO_VERSION));
+        let qjs = dir.join(tool_file_name("qjs"));
         if qjs.is_file() {
             return Some(qjs);
         }
@@ -319,6 +371,28 @@ fn log(message: &str) {
     eprintln!("[WeTube] {message}");
 }
 
+/// 下载链路的落盘日志（`%TEMP%\WeTube-download.log`）。
+///
+/// GUI 版没有终端，`log` 那行看不到。踩过的坑是"合并被静默跳过"：yt-dlp 只在
+/// stderr 里轻轻警告一句 ffmpeg 不可用，还被 `--no-warnings` 吞掉，界面上只看得到
+/// "下载成功"。所以每次下载都把关键上下文（ffmpeg 位置、选择器、退出结果、
+/// stderr 原文）留一份，事后一眼能查。
+fn download_log(message: &str) {
+    let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(std::env::temp_dir().join("WeTube-download.log"))
+    else {
+        return;
+    };
+    use std::io::Write as _;
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let _ = writeln!(file, "[{secs}] {message}");
+}
+
 /// 取全部格式里"画质最好的一档"用到的公共信息——页面上要显示标题、时长、
 /// 缩略图，格式列表只挑关键的几个字段，避免把几十个 itag 全塞给页面。
 fn summarize(info: &Value) -> Value {
@@ -393,13 +467,15 @@ fn with_deno(cmd: &mut Command, deno: &Option<std::path::PathBuf>) {
 }
 
 /// 探测视频信息（阻塞，跑在后台线程）。成功时返回可直接发给页面的摘要 JSON。
-pub fn probe(url: &str) -> Result<Value, String> {
+pub fn probe(url: &str, cookies: &CookieSource) -> Result<Value, String> {
     let ytdlp = yt_dlp_path().ok_or("未找到 yt-dlp（App 包损坏或未安装）")?;
     let mut cmd = Command::new(&ytdlp);
     no_console_window(&mut cmd);
-    cmd.arg("-J").arg("--no-warnings").arg(url);
-    if let Some(dir) = ffmpeg_dir() {
-        cmd.arg("--ffmpeg-location").arg(&dir);
+    cmd.arg("-J").arg("--no-warnings");
+    cookies.apply(&mut cmd);
+    cmd.arg(url);
+    if let Some(path) = ffmpeg_path() {
+        cmd.arg("--ffmpeg-location").arg(&path);
     }
     with_deno(&mut cmd, &deno_path());
     let output = cmd
@@ -417,7 +493,7 @@ pub fn probe(url: &str) -> Result<Value, String> {
             .map(str::trim)
             .find(|line| !line.is_empty())
             .unwrap_or("未知错误");
-        return Err(format!("探测失败：{reason}"));
+        return Err(format!("探测失败：{}", friendly_error(reason)));
     }
 
     let info: Value = serde_json::from_slice(&output.stdout)
@@ -429,6 +505,112 @@ pub fn probe(url: &str) -> Result<Value, String> {
 /// yt-dlp 默认 1（纯串行）。8 是速度与「不被当异常流量」之间的平衡点，
 /// 设置面板可改。
 pub const DEFAULT_CONCURRENT_FRAGMENTS: u32 = 8;
+
+/// Cookie 来源。
+///
+/// YouTube 会对部分视频/会话弹「Sign in to confirm you're not a bot」，这是
+/// 站点侧的风控，换 player_client 也过不去（实测 tv/web_safari/android/ios
+/// 全部一样），官方给的路子就是带上 cookie。两种给法：
+/// 从浏览器读、或指定导出的 cookies.txt。
+#[derive(Clone)]
+pub enum CookieSource {
+    /// 不用 cookie
+    None,
+    /// 自动：用应用自己导出的 cookies.txt（见 cookies.rs）。默认值。
+    Auto,
+    /// 浏览器名（chrome / edge / firefox），交给 yt-dlp 自己解密读取
+    Browser(String),
+    /// Netscape 格式 cookies.txt 的路径
+    File(std::path::PathBuf),
+}
+
+impl CookieSource {
+    /// 从设置里解析，「cookies.txt 路径」优先于「从浏览器读取」——
+    /// 前者不受浏览器占用数据库的影响，更可靠。
+    pub fn from_settings(file: &str, browser: &str) -> Self {
+        let file = file.trim().trim_matches('"').trim_matches('\'').trim();
+        if !file.is_empty() {
+            // 支持 ~ 开头的家目录写法，跟下载文件夹保持一致的手感
+            let path = match dirs::home_dir() {
+                Some(home) if file == "~" => home,
+                Some(home) => match file.strip_prefix("~/").or_else(|| file.strip_prefix("~\\")) {
+                    Some(rest) => home.join(rest),
+                    None => std::path::PathBuf::from(file),
+                },
+                None => std::path::PathBuf::from(file),
+            };
+            return CookieSource::File(path);
+        }
+        match browser.trim() {
+            "" | "关闭" => CookieSource::None,
+            // 「自动」= 用 WeTube 内置浏览器（WebView2）的登录态。这是默认值：
+            // 用户在应用里登录过 YouTube，下载就不该再被机器人校验拦。
+            // 「自动」= 用应用自己导出的 cookies.txt。不能直接让 yt-dlp 去读
+            // WebView2 的配置目录：应用运行时 Chromium 会把那个数据库锁住
+            // （实测报 "Could not copy Chrome cookie database"），而下载只可能
+            // 在应用运行时发生，等于此路不通。所以改成应用先导出成 cookies.txt。
+            "自动" => CookieSource::Auto,
+            name => CookieSource::Browser(name.to_string()),
+        }
+    }
+
+    /// 「自动」在真正用之前解析成文件路径。
+    ///
+    /// 导出由主线程在收到下载请求时同步完成（见 cookies.rs），走到这里文件
+    /// 已经在了。万一没有（比如还没登录过），就当作不带 cookie——不影响下载，
+    /// 只是可能被 YouTube 的机器人校验拦一下。
+    fn resolved(&self) -> CookieSource {
+        match self {
+            CookieSource::Auto => match crate::cookies::cookies_path() {
+                Some(path) if path.is_file() => CookieSource::File(path),
+                _ => CookieSource::None,
+            },
+            other => other.clone(),
+        }
+    }
+
+    /// 把参数挂到 yt-dlp 命令行上。
+    fn apply(&self, cmd: &mut Command) {
+        match self.resolved() {
+            CookieSource::None | CookieSource::Auto => {}
+            CookieSource::Browser(name) => {
+                cmd.arg("--cookies-from-browser").arg(name);
+            }
+            CookieSource::File(path) => {
+                cmd.arg("--cookies").arg(path);
+            }
+        }
+    }
+}
+
+/// 把 yt-dlp 的英文报错翻成"能照着做"的中文。
+///
+/// 原来直接把原文抛给用户，机器人校验这种提示等于没说——用户看不懂
+/// 「Sign in to confirm you're not a bot」该去点哪儿。
+fn friendly_error(raw: &str) -> String {
+    if raw.contains("Sign in to confirm you") {
+        return "YouTube 要求先通过机器人校验。请在「设置 → 下载设置」里指定 cookies.txt，\
+                或把「从浏览器读取 Cookie」选成你常用的浏览器（选浏览器方式时需先完全退出该浏览器）。"
+            .to_string();
+    }
+    if raw.contains("Could not copy") && raw.contains("cookie") {
+        return "读取浏览器 Cookie 失败：浏览器运行时会锁住 Cookie 数据库。\
+                请完全退出该浏览器后重试，或改用导出的 cookies.txt。"
+            .to_string();
+    }
+    if raw.contains("Failed to decrypt") || raw.contains("DPAPI") {
+        return "浏览器 Cookie 解密失败（新版 Chrome/Edge 的加密方式变了）。\
+                建议改用导出的 cookies.txt。"
+            .to_string();
+    }
+    if raw.contains("No supported JavaScript runtime") {
+        return "缺少 JavaScript 运行时（YouTube 的 EJS 挑战需要它）。".to_string();
+    }
+    if raw.contains("Private video") || raw.contains("members-only") {
+        return format!("这是私享/会员专属视频，需要带登录态的 Cookie：{raw}");
+    }
+    raw.to_string()
+}
 
 /// 一次下载任务的参数。
 pub struct Job<'a> {
@@ -446,6 +628,8 @@ pub struct Job<'a> {
     pub out_dir: &'a std::path::Path,
     /// 单任务并发分片数
     pub concurrent: u32,
+    /// cookie 来源（YouTube 机器人校验要靠它过）
+    pub cookies: &'a CookieSource,
 }
 
 /// 指定的格式 id 优先，为空时用兜底选择器。
@@ -517,6 +701,7 @@ pub fn start(
         has_audio,
         out_dir,
         concurrent,
+        cookies,
     } = job;
 
     let ytdlp = yt_dlp_path().ok_or("未找到 yt-dlp（App 包损坏或未安装）")?;
@@ -524,7 +709,7 @@ pub fn start(
 
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
     // ffmpeg 只探一次：下面选选择器和工作目录都要用
-    let ffmpeg = ffmpeg_dir();
+    let ffmpeg = ffmpeg_path();
     // deno 同样只探一次：EJS 挑战需要 JS runtime，没有它每次都会告警
     let deno = deno_path();
 
@@ -554,10 +739,11 @@ pub fn start(
         .arg("--no-quiet")
         .arg("-P")
         .arg(out_dir);
-    if let Some(dir) = &ffmpeg {
-        cmd.arg("--ffmpeg-location").arg(dir);
+    if let Some(path) = &ffmpeg {
+        cmd.arg("--ffmpeg-location").arg(path);
     }
     with_deno(&mut cmd, &deno);
+    cookies.apply(&mut cmd);
 
     if mode == "audio" {
         if ffmpeg.is_some() {
@@ -583,6 +769,11 @@ pub fn start(
     }
     cmd.arg("--").arg(url);
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+    // 诊断日志要用的 owned 副本：下面的读取线程是 'static 的 move 闭包，
+    // 而 Job 里的 mode/format_id 是借来的 &str，直接带进去会借用逃逸。
+    let mode_log = mode.to_string();
+    let format_log = format_id.to_string();
 
     let mut child = cmd.spawn().map_err(|err| format!("启动 yt-dlp 失败：{err}"))?;
     let pid = child.id();
@@ -637,6 +828,17 @@ pub fn start(
 
         let mut map = CHILDREN.lock().ok();
         let child = map.as_mut().and_then(|m| m.remove(&pid));
+        {
+            // ffmpeg 位置尤其关键：给的是文件路径，且必须是规范名
+            let ffmpeg_note = match &ffmpeg {
+                Some(path) => path.display().to_string(),
+                None => "无（yt-dlp 会跳过合并）".to_string(),
+            };
+            let stderr_note: String = stderr_text.trim().chars().take(1200).collect();
+            download_log(&format!(
+                "结束 id={id} mode={mode_log} format={format_log} ffmpeg={ffmpeg_note} stderr={stderr_note}"
+            ));
+        }
         let (ok, err) = match child {
             Some(mut child) => match child.wait() {
                 Ok(status) if status.success() => (true, None),
@@ -651,7 +853,7 @@ pub fn start(
                             .map(str::trim)
                             .find(|l| !l.is_empty())
                             .unwrap_or("下载失败");
-                        (false, Some(reason.to_string()))
+                        (false, Some(friendly_error(reason)))
                     }
                 }
                 Err(err) => (false, Some(format!("等待进程退出失败：{err}"))),
@@ -736,17 +938,88 @@ mod tests {
         assert!(parse_progress_line("WTDL|100.0%|").is_none());
     }
 
-    /// 内嵌副本的文件名带版本号，升级后不会复用旧文件。
+    /// cookie 来源解析：cookies.txt 优先于浏览器；"关闭" 视为不用。
     #[test]
-    fn embedded_file_name_carries_version() {
-        let name = tool_file_name("yt-dlp", "1.2.3");
-        let expected = if cfg!(windows) { "yt-dlp-1.2.3.exe" } else { "yt-dlp-1.2.3" };
-        assert_eq!(name, expected);
-        // 版本为空时退化成不带版本的名字
-        assert_eq!(
-            tool_file_name("ffmpeg", ""),
-            if cfg!(windows) { "ffmpeg.exe" } else { "ffmpeg" }
+    fn cookie_source_from_settings() {
+        assert!(matches!(
+            CookieSource::from_settings("", ""),
+            CookieSource::None
+        ));
+        assert!(matches!(
+            CookieSource::from_settings("   ", "关闭"),
+            CookieSource::None
+        ));
+        match CookieSource::from_settings("", "chrome") {
+            CookieSource::Browser(name) => assert_eq!(name, "chrome"),
+            _ => panic!("应解析为浏览器来源"),
+        }
+        match CookieSource::from_settings("D:/c.txt", "chrome") {
+            CookieSource::File(path) => assert_eq!(path, std::path::PathBuf::from("D:/c.txt")),
+            _ => panic!("cookies.txt 应优先于浏览器"),
+        }
+        // 从资源管理器"拷贝为路径"粘过来会带引号，顺手剥掉
+        match CookieSource::from_settings("\"D:/my cookies.txt\"", "") {
+            CookieSource::File(path) => {
+                assert_eq!(path, std::path::PathBuf::from("D:/my cookies.txt"));
+            }
+            _ => panic!("应剥掉首尾引号"),
+        }
+    }
+
+    /// 报错翻译：机器人校验要给能照着做的中文，无关报错原样透传。
+    #[test]
+    fn friendly_error_maps_bot_check() {
+        let raw =
+            "ERROR: [youtube] xxx: Sign in to confirm you're not a bot. Use --cookies-from-browser";
+        let msg = friendly_error(raw);
+        assert!(msg.contains("机器人校验"), "应翻成中文提示：{msg}");
+        assert!(msg.contains("cookies.txt"), "提示里要给出可操作的办法：{msg}");
+
+        assert!(
+            friendly_error("ERROR: Could not copy Chrome cookie database.").contains("完全退出"),
+            "数据库被占用时应提示退出浏览器"
         );
+        let other = "ERROR: Video unavailable";
+        assert_eq!(friendly_error(other), other, "无关报错保持原样");
+    }
+
+    /// 旧版本留下的带版本号副本要清掉，且不能误删别的工具。
+    /// 一个 ffmpeg 副本就是 100MB，升级几次不清理会白占几百兆。
+    #[test]
+    fn prune_removes_versioned_leftovers_only() {
+        let dir = std::env::temp_dir().join("wetube-prune-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let keep = dir.join(tool_file_name("ffmpeg"));
+        std::fs::write(&keep, b"x").unwrap();
+        let stale = dir.join("ffmpeg-9.0.1.exe");
+        std::fs::write(&stale, b"y").unwrap();
+        let other = dir.join(tool_file_name("yt-dlp"));
+        std::fs::write(&other, b"z").unwrap();
+
+        prune_other_copies(&dir, "ffmpeg", &keep);
+
+        assert!(!stale.exists(), "带版本号的旧副本应被清掉");
+        assert!(keep.exists(), "当前副本不能被删");
+        assert!(other.exists(), "别的工具不能被误删");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 解出的工具必须是**规范名**：yt-dlp 拿着 `--ffmpeg-location` 指到的位置
+    /// 自己去找 `ffmpeg`，名字带了版本号它就找不到，合并会被静默跳过
+    /// （表现为"下载成功但没声音"）。这条守着那个回归。
+    #[test]
+    fn tool_file_name_is_canonical() {
+        for stem in ["ffmpeg", "yt-dlp", "qjs"] {
+            let name = tool_file_name(stem);
+            let expected = if cfg!(windows) {
+                format!("{stem}.exe")
+            } else {
+                stem.to_string()
+            };
+            assert_eq!(name, expected, "{stem} 必须是规范名");
+        }
     }
 
     /// 视频选择器：这次「下出来没声音」的核心修复点。
@@ -786,6 +1059,8 @@ mod tests {
         stem: &str,
         bytes: &[u8],
         version: &str,
+        packed: bool,
+        expected_size: u64,
         args: &[&str],
         expect_prefix: &str,
     ) {
@@ -796,14 +1071,18 @@ mod tests {
         let dir = std::env::temp_dir().join("wetube-embedded-test");
         std::fs::create_dir_all(&dir).unwrap();
 
-        let path = extract_tool(&dir, stem, bytes, version).expect("解出内嵌工具失败");
-        assert_eq!(
-            std::fs::metadata(&path).unwrap().len(),
-            bytes.len() as u64,
-            "解出的 {stem} 大小应与内嵌字节一致"
-        );
+        let path =
+            extract_tool(&dir, stem, bytes, packed, expected_size).expect("解出内嵌工具失败");
+        let got = std::fs::metadata(&path).unwrap().len();
+        if expected_size > 0 {
+            // 压缩态下这条尤其关键：解出来的必须是原始字节数，不是压缩态大小
+            assert_eq!(got, expected_size, "解出的 {stem} 大小应与原始文件一致");
+        }
         // 第二遍复用同一份，不重复写盘
-        assert_eq!(extract_tool(&dir, stem, bytes, version).unwrap(), path);
+        assert_eq!(
+            extract_tool(&dir, stem, bytes, packed, expected_size).unwrap(),
+            path
+        );
 
         let out = std::process::Command::new(&path)
             .args(args)
@@ -822,12 +1101,54 @@ mod tests {
         }
     }
 
+    /// 内嵌 ffmpeg 解出来的路径必须是规范名——合并能否发生就取决于它。
+    #[test]
+    fn embedded_ffmpeg_path_is_canonical() {
+        if bundled::FFMPEG_BYTES.is_empty() {
+            eprintln!("本次构建未内嵌 ffmpeg，跳过");
+            return;
+        }
+        let dir = std::env::temp_dir().join("wetube-embedded-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = extract_tool(
+            &dir,
+            "ffmpeg",
+            bundled::FFMPEG_BYTES,
+            bundled::FFMPEG_PACKED,
+            bundled::FFMPEG_SIZE,
+        )
+        .expect("解出内嵌 ffmpeg 失败");
+        assert_eq!(
+            path.file_name().unwrap().to_string_lossy(),
+            tool_file_name("ffmpeg"),
+            "解出的 ffmpeg 必须是规范名，否则 yt-dlp 找不到它、不会合并"
+        );
+    }
+
+    /// qjs 是 YouTube EJS 挑战要用的 JS runtime，同样要能真的跑起来。
+    #[test]
+    fn embedded_qjs_extracts_and_runs() {
+        extract_and_run(
+            "qjs",
+            bundled::DENO_BYTES,
+            bundled::DENO_VERSION,
+            bundled::DENO_PACKED,
+            bundled::DENO_SIZE,
+            // qjs 的 --version 输出就是裸版本号（如 "0.16.2"），
+            // 正好让通用断言里的"自报版本应含 vendor 版本"一并生效
+            &["--version"],
+            "",
+        );
+    }
+
     #[test]
     fn embedded_ytdlp_extracts_and_runs() {
         extract_and_run(
             "yt-dlp",
             bundled::YTDLP_BYTES,
             bundled::YTDLP_VERSION,
+            bundled::YTDLP_PACKED,
+            bundled::YTDLP_SIZE,
             &["--version"],
             "",
         );
@@ -840,6 +1161,8 @@ mod tests {
             "ffmpeg",
             bundled::FFMPEG_BYTES,
             bundled::FFMPEG_VERSION,
+            bundled::FFMPEG_PACKED,
+            bundled::FFMPEG_SIZE,
             &["-version"],
             "ffmpeg version",
         );

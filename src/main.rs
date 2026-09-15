@@ -36,6 +36,7 @@ use wry::{
 use muda::MenuEvent;
 
 mod config;
+mod cookies;
 mod download;
 mod shortcuts;
 mod translate;
@@ -228,6 +229,11 @@ fn main() -> Result<(), Box<dyn Error>> {
             NewWindowResponse::Deny
         })
         .build(&window)?;
+
+    // 启动先导一份（可能是上次登录留下的会话），之后每次点下载前再刷一次。
+    if let Err(err) = cookies::export(&webview) {
+        log_err(&format!("启动时导出 cookie 失败：{err}"));
+    }
 
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
@@ -507,12 +513,18 @@ fn handle_panel_message(
                 return;
             };
             let url = url.to_string();
+            // YouTube 的机器人校验只能靠 cookie 过，来源由设置决定。
+            // 先同步导一份最新的——毫秒级，且下游要用文件，不能异步。
+            if let Err(err) = cookies::export(webview) {
+                log_err(&format!("导出 cookie 失败：{err}"));
+            }
+            let cookies = cookie_source(store);
             let proxy = proxy.clone();
             let _ = proxy.send_event(Command::DownloadEvent(serde_json::json!({
                 "kind": "probe-start", "url": url,
             })));
             std::thread::spawn(move || {
-                let event = match download::probe(&url) {
+                let event = match download::probe(&url, &cookies) {
                     Ok(mut info) => {
                         info["kind"] = "probe-ok".into();
                         info["url"] = url.clone().into();
@@ -570,6 +582,10 @@ fn handle_panel_message(
                     configured.unwrap_or_else(default_download_dir)
                 }
             };
+            if let Err(err) = cookies::export(webview) {
+                log_err(&format!("导出 cookie 失败：{err}"));
+            }
+            let cookies = cookie_source(store);
             // 并发分片数：设置面板「下载设置 → 并发分片」，缺省 8
             let concurrent = store
                 .full_config()
@@ -594,6 +610,7 @@ fn handle_panel_message(
                     has_audio,
                     out_dir: &out_dir,
                     concurrent,
+                    cookies: &cookies,
                 },
                 // 进度回调：包装上任务标识送回主线程
                 {
@@ -667,6 +684,24 @@ fn resolve_dir_input(raw: &str) -> Option<PathBuf> {
         return dirs::home_dir().map(|home| home.join(rest));
     }
     Some(PathBuf::from(trimmed))
+}
+
+/// 从设置里读 cookie 来源（「设置 → 下载设置」）。
+///
+/// cookies.txt 路径优先；没填就看「从浏览器读取」选的是哪个浏览器。
+/// 两者都没配就是不用 cookie——YouTube 弹机器人校验时才会体现出来。
+fn cookie_source(store: &ConfigStore) -> download::CookieSource {
+    let settings = store.full_config();
+    let node = settings.get("downloadSettings");
+    let file = node
+        .and_then(|node| node.get("cookiesFile"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let browser = node
+        .and_then(|node| node.get("cookiesFromBrowser"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    download::CookieSource::from_settings(file, browser)
 }
 
 /// 默认下载目录：系统下载文件夹下的 WeTube 子目录。
