@@ -100,11 +100,22 @@ release 版也写——之前排查「批量全败但零错误记录」的教训
 
 ### Windows
 
-```bash
+```powershell
+# 先把外置工具取到 vendor/（版本 pin 死 + SHA256 校验），构建时会被内嵌
+powershell -ExecutionPolicy Bypass -File scripts/fetch-bundled-tools-windows.ps1
 cargo build --release
-# 产物：target/release/WeTube.exe
+# 产物：target/release/WeTube.exe（单文件，含内嵌的 yt-dlp + ffmpeg）
 ```
 
+> **外置工具内嵌**：Windows 版把 `vendor/yt-dlp.exe`（约 17MB）和 `vendor/ffmpeg.exe`
+> （约 98MB）用 `include_bytes!` 编进产物，运行时解到
+> `%LOCALAPPDATA%\WeTube\bin\<工具>-<版本>.exe` 再执行——对外只有一个 exe。
+> 解出后按版本名复用，升级会换新文件并清掉旧副本；没跑 fetch 脚本也能构建，
+> 只是不内嵌，运行时退回 exe 同目录 / PATH 查找。`vendor/` 不入库（见 `.gitignore`）。
+>
+> 为什么要 ffmpeg：YouTube 1080p 以上的音视频是**两条分离的流**，下载后必须用
+> ffmpeg 合并成带声音的 MP4；没有它就只能下 ≤720p 的渐进式单文件。
+>
 > 图标嵌入需要资源编译器：Windows 上用 SDK 里的 `rc.exe`（装了 MSVC 生成工具就有），
 > 从 macOS / Linux 交叉编译时用 MinGW 的 `windres`（可用 `WINDRES` 环境变量指定路径）。
 > 找不到也只是没有图标，照样能编译和运行。
@@ -112,6 +123,7 @@ cargo build --release
 > 交叉编译：`rustup target add x86_64-pc-windows-gnu && cargo build --release --target x86_64-pc-windows-gnu`。
 > 判断目标系统走的是 `CARGO_CFG_TARGET_OS` 环境变量——`build.rs` 里的
 > `#[cfg(target_os)]` 判断的是**宿主**而不是目标，用它会让交叉编译时图标整个跳过。
+> 内嵌 yt-dlp 只对 Windows 目标生效，其他平台落空实现（macOS 走 `.app` 的 `Resources/bin`）。
 
 ### macOS
 

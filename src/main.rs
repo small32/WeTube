@@ -537,6 +537,12 @@ fn handle_panel_message(
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_string();
+            // 选中的格式是否自带音轨。YouTube 1080p 以上音视频分离，页面选中的
+            // 多是不含音轨的视频轨，缺了这条就会下出无声视频。
+            let has_audio = payload
+                .get("hasAudio")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
             let url = url.to_string();
             let mode = mode.to_string();
             // 输出目录，按优先级：
@@ -564,15 +570,31 @@ fn handle_panel_message(
                     configured.unwrap_or_else(default_download_dir)
                 }
             };
+            // 并发分片数：设置面板「下载设置 → 并发分片」，缺省 8
+            let concurrent = store
+                .full_config()
+                .get("downloadSettings")
+                .and_then(|node| node.get("concurrency"))
+                .and_then(|value| {
+                    value
+                        .as_u64()
+                        .map(|n| n as u32)
+                        .or_else(|| value.as_str().and_then(|s| s.parse::<u32>().ok()))
+                })
+                .unwrap_or(download::DEFAULT_CONCURRENT_FRAGMENTS);
             let proxy = proxy.clone();
             // 下载任务 id 在 download::start 内部才分配，而进度回调构造在它
             // 之前——用一个可写的槽位中转：闭包每次触发时读最新值。
             let id_slot = std::sync::Arc::new(AtomicU32::new(0));
             match download::start(
-                &url,
-                &mode,
-                &format_id,
-                &out_dir,
+                download::Job {
+                    url: &url,
+                    mode: &mode,
+                    format_id: &format_id,
+                    has_audio,
+                    out_dir: &out_dir,
+                    concurrent,
+                },
                 // 进度回调：包装上任务标识送回主线程
                 {
                     let proxy = proxy.clone();

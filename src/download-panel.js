@@ -398,8 +398,11 @@
     sel.appendChild(best);
     for (const f of videos.slice(0, 12)) {
       const opt = document.createElement("option");
-      opt.value = `video:${f.formatId}`;
-      opt.textContent = `${f.height}p${f.fps && f.fps > 30 ? Math.round(f.fps) : ""} ${f.ext}${f.size ? ` · ${fmtSize(f.size)}` : ""}`;
+      // 第三段标出这条格式是否自带音轨：YouTube 1080p 以上音视频分离，
+      // 选了不含音轨的视频轨时要让 Rust 端补一条音轨再合并。
+      opt.value = `video:${f.formatId}:${f.combined ? "1" : "0"}`;
+      const needAudio = f.combined ? "" : " · 自动配音频";
+      opt.textContent = `${f.height}p${f.fps && f.fps > 30 ? Math.round(f.fps) : ""} ${f.ext}${f.size ? ` · ${fmtSize(f.size)}` : ""}${needAudio}`;
       sel.appendChild(opt);
     }
     const sep = document.createElement("option");
@@ -421,12 +424,14 @@
     go.className = "t-go";
     go.textContent = "下载";
     go.addEventListener("click", () => {
-      const [mode, formatId] = sel.value.split(":");
+      const [mode, formatId, audioFlag] = sel.value.split(":");
       send({
         type: "download:start",
         url: task.url,
         mode,
         formatId: formatId || "",
+        // 缺省视为自带音轨（"最高画质"档由 Rust 端自己拼音视频）
+        hasAudio: audioFlag !== "0",
       });
       task.formats.textContent = "";
       task.left.textContent = "排队中…";

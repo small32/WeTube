@@ -1188,6 +1188,19 @@
           "label": "下载文件夹",
           "placeholder": "留空使用默认位置",
           "hint": "手动指定保存目录，留空时 macOS 存到 ~/Downloads/WeTube，Windows 存到系统下载文件夹\\WeTube"
+        },
+        {
+          "key": "concurrency",
+          "type": "select",
+          "default": "8",
+          "label": "并发分片",
+          "options": [
+            "1",
+            "4",
+            "8",
+            "16"
+          ],
+          "hint": "单个任务同时下载的分片数。YouTube 音视频分片传输，并行抓更快；被限速时降到 4 或 1"
         }
       ]
     }

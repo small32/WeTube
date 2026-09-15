@@ -12,7 +12,7 @@
 
 	const PANEL_ID = "yte-settings-panel";
 	// 构建号戳：显示在面板底部，用于确认运行的是哪个版本（每次发布手动更新）。
-	const BUILD_STAMP = "20260906-2249";
+	const BUILD_STAMP = "20260910-2306";
 
 	// 页面里没有 devtools，任何 JS 错误都记到全局，面板 footer 会显示出来。
 	window.addEventListener("error", (event) => {

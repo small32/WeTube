@@ -9,6 +9,10 @@ fn main() {
     // 那个 cfg 判断的也是宿主系统，不是目标系统——从 macOS 交叉编译 Windows 时
     // 它整个是 false，windows_icon() 连编译都不会编进去，产物就没有图标。
     // 判断目标系统只能靠 CARGO_CFG_TARGET_OS 这个环境变量。
+    // 必须无条件调用：download.rs 里对生成文件是硬 include!，
+    // 非 Windows 目标也要落一个空实现，否则那个平台直接编译不过。
+    embed_bundled_tools();
+
     if target_os() == "windows" {
         windows_icon();
     }
@@ -17,6 +21,101 @@ fn main() {
     println!("cargo:rerun-if-changed=src/ui.js");
     println!("cargo:rerun-if-changed=src/titlebar.js");
     println!("cargo:rerun-if-changed=icons");
+}
+
+/// 一个随 App 分发的外置工具：构建时内嵌进产物，运行时解出来执行。
+struct BundledTool {
+    /// vendor/ 下的文件名
+    file: &'static str,
+    /// 同目录下的版本文件名（内容是一行版本号）
+    version_file: &'static str,
+    /// 生成的字节常量名
+    bytes_const: &'static str,
+    /// 生成的版本常量名
+    version_const: &'static str,
+}
+
+/// 要内嵌的工具清单。新增工具只在这里加一行，download.rs 那边同步处理即可。
+const BUNDLED_TOOLS: [BundledTool; 2] = [
+    BundledTool {
+        file: "yt-dlp.exe",
+        version_file: "yt-dlp.version",
+        bytes_const: "YTDLP_BYTES",
+        version_const: "YTDLP_VERSION",
+    },
+    BundledTool {
+        file: "ffmpeg.exe",
+        version_file: "ffmpeg.version",
+        bytes_const: "FFMPEG_BYTES",
+        version_const: "FFMPEG_VERSION",
+    },
+];
+
+/// 把 vendor/ 下的外置工具内嵌进产物，供 Windows 单文件分发使用。
+///
+/// 生成的 `bundled_tools.rs` 落进 OUT_DIR，由 download.rs include!。
+/// 有 vendor/<工具> 就写真实的 include_bytes!，没有就写空切片 + 警告——
+/// 没跑过 fetch 脚本的机器照样能构建，只是不内嵌、运行时退回外部查找。
+fn embed_bundled_tools() {
+    let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR 未设置"));
+
+    // 只有 Windows 产物需要内嵌（macOS 走 .app 的 Resources/bin）。
+    // 但空实现必须照写：download.rs 对生成文件是硬 include!。
+    if target_os() != "windows" {
+        fs::write(out_dir.join("bundled_tools.rs"), empty_tools_rs())
+            .expect("写入 bundled_tools.rs 失败");
+        return;
+    }
+
+    let vendor = Path::new("vendor");
+    // 直接拼 CARGO_MANIFEST_DIR 的绝对路径：fs::canonicalize 在 Windows 上
+    // 会带上 \\?\ 前缀，喂给 include_bytes! 容易踩坑，这里不冒这个险。
+    let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default();
+    let mut code = String::new();
+
+    for tool in &BUNDLED_TOOLS {
+        let file = vendor.join(tool.file);
+        println!("cargo:rerun-if-changed=vendor/{}", tool.file);
+        println!("cargo:rerun-if-changed=vendor/{}", tool.version_file);
+
+        if file.is_file() {
+            let abs = Path::new(&manifest).join(&file);
+            let version = fs::read_to_string(vendor.join(tool.version_file))
+                .map(|value| value.trim().to_string())
+                .unwrap_or_default();
+            code.push_str(&format!(
+                "pub static {}: &[u8] = include_bytes!(r\"{}\");\npub const {}: &str = \"{}\";\n",
+                tool.bytes_const,
+                abs.display(),
+                tool.version_const,
+                version
+            ));
+        } else {
+            println!(
+                "cargo:warning=未找到 vendor/{}，本次构建不内嵌它（可先跑 scripts/fetch-bundled-tools-windows.ps1）",
+                tool.file
+            );
+            code.push_str(&format!(
+                "pub static {}: &[u8] = &[];\npub const {}: &str = \"\";\n",
+                tool.bytes_const, tool.version_const
+            ));
+        }
+    }
+
+    fs::write(out_dir.join("bundled_tools.rs"), code).expect("写入 bundled_tools.rs 失败");
+}
+
+/// 全部工具都未内嵌时的空实现。
+fn empty_tools_rs() -> String {
+    BUNDLED_TOOLS
+        .iter()
+        .map(|tool| {
+            format!(
+                "pub static {}: &[u8] = &[];\npub const {}: &str = \"\";\n",
+                tool.bytes_const, tool.version_const
+            )
+        })
+        .collect()
 }
 
 /// 目标系统的名字（`windows` / `macos` / `linux`…）。
