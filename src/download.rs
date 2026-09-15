@@ -107,6 +107,7 @@ fn embedded_tools_dir() -> Option<std::path::PathBuf> {
             let tools = [
                 ("yt-dlp", bundled::YTDLP_BYTES, bundled::YTDLP_VERSION),
                 ("ffmpeg", bundled::FFMPEG_BYTES, bundled::FFMPEG_VERSION),
+                ("qjs", bundled::DENO_BYTES, bundled::DENO_VERSION),
             ];
             for (stem, bytes, version) in tools {
                 if bytes.is_empty() {
@@ -211,6 +212,36 @@ pub fn ffmpeg_dir() -> Option<std::path::PathBuf> {
     }
     // 3. PATH 里装的（winget/scoop/homebrew）同样认
     find_exe(&path_dirs(), "ffmpeg").and_then(|path| path.parent().map(std::path::Path::to_path_buf))
+}
+
+/// qjs（QuickJS-NG）的位置，交给 yt-dlp 的 --js-runtimes quickjs:<path>。
+///
+/// yt-dlp 的 EJS（YouTube 播放器挑战）需要跑 JS：没有 runtime 时每次探测/
+/// 下载都会报 "No supported JavaScript runtime" 警告，某些客户端还会直接
+/// 失败。打包目录里放了 ~1MB 的 QuickJS-NG（qjs），替代 81MB 的 deno——
+/// yt-dlp 官方支持 quickjs runtime（要求 QuickJS-NG ≥ 0.12.0，旧版无优化
+/// 会慢到几分钟）。按与 ffmpeg 相同的优先级找：
+///
+/// 1. 自带目录（macOS bundle：Resources/bin / exe 同目录 / exe 同目录 bin）；
+/// 2. 内嵌副本所在目录（Windows 单文件分发解出的 WeTube/bin）；
+/// 3. 系统 PATH（开发模式，或用户自备）。
+///
+/// 找不到不算错误：只是退回无 runtime 的旧行为（有警告），下载功能照常。
+/// 函数名保留 deno_path 历史名，实际找的是 qjs。
+pub fn deno_path() -> Option<std::path::PathBuf> {
+    // 1. 自带目录（macOS bundle 的 Resources/bin 等）
+    if let Some(path) = find_exe(&bundled_dirs(), "qjs") {
+        return Some(path);
+    }
+    // 2. 内嵌副本所在目录（Windows 单文件分发）
+    if let Some(dir) = embedded_tools_dir() {
+        let qjs = dir.join(tool_file_name("qjs", bundled::DENO_VERSION));
+        if qjs.is_file() {
+            return Some(qjs);
+        }
+    }
+    // 3. PATH 里装的（brew/winget/scoop）同样认
+    find_exe(&path_dirs(), "qjs")
 }
 
 /// GUI App 拉起控制台子程序时，Windows 会额外弹一个黑色控制台窗口。
@@ -347,6 +378,20 @@ fn summarize(info: &Value) -> Value {
     })
 }
 
+/// 给 yt-dlp 命令挂上 JS runtime（EJS 用）。找到了就加
+/// `--no-js-runtimes --js-runtimes quickjs:<path>`，找不到就不加——
+/// 旧行为兜底，不该因此报错。
+///
+/// 必须先 `--no-js-runtimes`：deno 是默认启用的最高优先级 runtime，不清掉
+/// 的话机器上装了 deno 时 quickjs 不会被用上。
+fn with_deno(cmd: &mut Command, deno: &Option<std::path::PathBuf>) {
+    if let Some(deno) = deno {
+        cmd.arg("--no-js-runtimes")
+            .arg("--js-runtimes")
+            .arg(format!("quickjs:{}", deno.display()));
+    }
+}
+
 /// 探测视频信息（阻塞，跑在后台线程）。成功时返回可直接发给页面的摘要 JSON。
 pub fn probe(url: &str) -> Result<Value, String> {
     let ytdlp = yt_dlp_path().ok_or("未找到 yt-dlp（App 包损坏或未安装）")?;
@@ -356,6 +401,7 @@ pub fn probe(url: &str) -> Result<Value, String> {
     if let Some(dir) = ffmpeg_dir() {
         cmd.arg("--ffmpeg-location").arg(&dir);
     }
+    with_deno(&mut cmd, &deno_path());
     let output = cmd
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -479,6 +525,8 @@ pub fn start(
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
     // ffmpeg 只探一次：下面选选择器和工作目录都要用
     let ffmpeg = ffmpeg_dir();
+    // deno 同样只探一次：EJS 挑战需要 JS runtime，没有它每次都会告警
+    let deno = deno_path();
 
     let mut cmd = Command::new(&ytdlp);
     no_console_window(&mut cmd);
@@ -509,6 +557,7 @@ pub fn start(
     if let Some(dir) = &ffmpeg {
         cmd.arg("--ffmpeg-location").arg(dir);
     }
+    with_deno(&mut cmd, &deno);
 
     if mode == "audio" {
         if ffmpeg.is_some() {

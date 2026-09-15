@@ -36,7 +36,9 @@ struct BundledTool {
 }
 
 /// 要内嵌的工具清单。新增工具只在这里加一行，download.rs 那边同步处理即可。
-const BUNDLED_TOOLS: [BundledTool; 2] = [
+/// qjs（QuickJS-NG）：yt-dlp 的 JS runtime（EJS），~2MB 替代 93MB 的 deno.exe，
+/// 消 "No supported JavaScript runtime" 警告。常量名沿用 DENO_*（历史名）。
+const BUNDLED_TOOLS: [BundledTool; 3] = [
     BundledTool {
         file: "yt-dlp.exe",
         version_file: "yt-dlp.version",
@@ -48,6 +50,12 @@ const BUNDLED_TOOLS: [BundledTool; 2] = [
         version_file: "ffmpeg.version",
         bytes_const: "FFMPEG_BYTES",
         version_const: "FFMPEG_VERSION",
+    },
+    BundledTool {
+        file: "qjs.exe",
+        version_file: "qjs.version",
+        bytes_const: "DENO_BYTES",
+        version_const: "DENO_VERSION",
     },
 ];
 

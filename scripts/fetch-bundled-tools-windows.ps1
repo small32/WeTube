@@ -5,14 +5,17 @@
 # 与 macOS 打包脚本同一套约定：版本 pin 死 + SHA256 校验，哈希对不上直接失败，
 # 防止供应链投毒；vendor/ 不入库（见 .gitignore），只在打包时本地生成。
 #
-# 两个工具：
+# 三个工具：
 #   yt-dlp —— 官方 release（PyInstaller 打包，GPLv3+，与本项目 GPL-3.0 兼容）
 #   ffmpeg —— gyan.dev essentials 构建（GPLv3，含合并音视频所需的全部封装器）
+#   qjs    —— QuickJS-NG JS runtime（EJS，~2MB），MIT，消 "No supported JavaScript runtime" 警告
 param(
   [string]$YtDlpVersion = "2026.08.19",
   [string]$YtDlpSha256 = "66674953fe251b89f4d08c5f0e35e0728679bd67ab3d7d05c0562af101dd3e7a",
   [string]$FfmpegVersion = "9.0.1",
   [string]$FfmpegSha256 = "fec81ae03971d9dd4be3ebe02e263bd2ec1d789483f931bdba5f5715e65da2e9",
+  [string]$QjsVersion = "0.16.2",
+  [string]$QjsSha256 = "7b27412de844403545bd151fbe49191b4d5b91a9e15b5db7c863fea54639a82b",
   [switch]$KeepArchive
 )
 
@@ -69,6 +72,24 @@ if ((Test-Path $ffmpeg) -and ((Get-Sha256 $ffmpeg) -eq $FfmpegSha256.ToLower()))
   if (-not $KeepArchive) { Remove-Item -Force $zip }
 }
 Set-Content -Path (Join-Path $vendor "ffmpeg.version") -Value $FfmpegVersion -NoNewline -Encoding ASCII
+
+# ---- qjs（QuickJS-NG）----
+# 官方 release 就是裸 qjs-windows-x86_64.exe（约 2MB），下载改名即可。
+# 替代 93MB 的 deno.exe：yt-dlp 官方支持 quickjs runtime（要求 QuickJS-NG
+# ≥ 0.12.0），EJS 警告同样消掉，包体小 90 多 MB。
+$qjs = Join-Path $vendor "qjs.exe"
+$qjsUrl = "https://github.com/quickjs-ng/quickjs/releases/download/v$QjsVersion/qjs-windows-x86_64.exe"
+if ((Test-Path $qjs) -and ((Get-Sha256 $qjs) -eq $QjsSha256.ToLower())) {
+  Write-Host "qjs $QjsVersion 已存在且校验通过"
+} else {
+  Write-Host "下载 qjs $QjsVersion（约 2MB）..."
+  Invoke-WebRequest -Uri $qjsUrl -OutFile $qjs -TimeoutSec 300
+  if ((Get-Sha256 $qjs) -ne $QjsSha256.ToLower()) {
+    Remove-Item -Force $qjs
+    throw "qjs SHA256 校验失败（已删除下载文件）"
+  }
+}
+Set-Content -Path (Join-Path $vendor "qjs.version") -Value $QjsVersion -NoNewline -Encoding ASCII
 
 Write-Host ""
 Write-Host "完成："

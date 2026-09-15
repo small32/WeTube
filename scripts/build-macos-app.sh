@@ -14,14 +14,77 @@ ICONSET="icons/AppIcon.iconset"
 # 打包进 Resources 的 yt-dlp / ffmpeg 版本（pin 死，保证构建可复现）。
 # 升级只改这几行 + 对应哈希；哈希对不上会直接构建失败，防止供应链投毒。
 # 来源与许可：
-#   yt-dlp  —— 官方 release（PyInstaller 打包，整体 GPLv3+，与本项目 GPL-3.0 兼容）
+#   yt-dlp  —— 官方 stable release（PyInstaller 打包，整体 GPLv3+，与本项目 GPL-3.0 兼容）。
+#              每次构建都自动查 GitHub API 对比 pin 版本与最新 stable，
+#              不是最新就自动改 pin 重入构建（YTDLP_AUTO_UPDATE=0 可关掉只提示）。
 #   ffmpeg  —— osxexperts.net 静态构建（GPLv3，含 x264/x265 编码器）
 YTDLP_VERSION="2026.08.19"
+YTDLP_URL="https://github.com/yt-dlp/yt-dlp/releases/download/${YTDLP_VERSION}/yt-dlp_macos"
 YTDLP_MACOS_SHA256="0f192b7ec147ab6288885d6351d9ab67367640029b4377576ef46dd79cf7b202"
 FFMPEG_URL="https://www.osxexperts.net/ffmpeg9arm.zip"
 FFMPEG_SHA256="d0c06c5c68ce48af3143b262f7a9118a7c9f67de1e237fcc24ffb14df9c67af9"
-FFPROBE_URL="https://www.osxexperts.net/ffprobe9arm.zip"
-FFPROBE_SHA256="0c94fbdd8917022f28115eca512196cf4648732bc9e5db9ec8896c7e519d02aa"
+# qjs —— QuickJS-NG 的 JS runtime（EJS）：YouTube 播放器挑战需要跑 JS，
+# 没有它 yt-dlp 会报 "No supported JavaScript runtime" 警告。
+# 用 ~1MB 的 QuickJS 替代 ~81MB 的 deno（yt-dlp 官方支持，要求 QuickJS-NG
+# ≥ 0.12.0，旧版无优化会慢到几分钟）。许可 MIT，与 GPL 兼容。
+QJS_VERSION="0.16.2"
+QJS_URL="https://github.com/quickjs-ng/quickjs/releases/download/v${QJS_VERSION}/qjs-darwin-arm64"
+QJS_SHA256="f6200e9856c45578a5d42ac873a32f3f994b421e29df9f63b452d9c7145015fc"
+# 注：不打包 ffprobe。App 代码从不直接调它，yt-dlp 拿不到 ffprobe 会自动
+# 退回用 ffmpeg 解析（实测合并/remux/提音频都正常），省下 50MB。
+
+# ---- yt-dlp stable 版本检查：每次构建都查最新 stable，不是最新就自动更新 ----
+#
+#   默认：发现新 stable 时自动下载、算哈希、改脚本 pin 后重入构建；
+#   YTDLP_AUTO_UPDATE=0：只提示不更新（手动改脚本头部 YTDLP_VERSION/SHA256）。
+#
+# 查询失败（离线/限流）只警告，不阻断构建。
+check_ytdlp_latest() {
+  local latest
+  latest="$(curl -fsSL --max-time 10 "https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest" 2>/dev/null \
+    | python3 -c 'import json,sys
+try: print(json.load(sys.stdin)["tag_name"])
+except Exception: pass' 2>/dev/null)" || latest=""
+  if [ -z "$latest" ]; then
+    echo "警告：查不到 yt-dlp 最新 stable 版本（离线或限流），继续用 ${YTDLP_VERSION}" >&2
+    return 0
+  fi
+  if [ "$latest" = "$YTDLP_VERSION" ]; then
+    echo "yt-dlp ${YTDLP_VERSION} 已是最新 stable"
+    return 0
+  fi
+  if [ "${YTDLP_AUTO_UPDATE:-1}" != "1" ]; then
+    echo "提示：yt-dlp 有新 stable 版本 ${latest}（当前 pin ${YTDLP_VERSION}）" >&2
+    echo "      升级：YTDLP_AUTO_UPDATE=1 重新构建，或手动改脚本头部 YTDLP_VERSION/SHA256" >&2
+    return 0
+  fi
+  # 自动更新：下载新二进制算哈希 → 改脚本 pin → exec 重入（避免当前进程用旧 pin）
+  local tmp new_sha
+  tmp="$(mktemp)" || { echo "警告：mktemp 失败，继续用 ${YTDLP_VERSION}" >&2; return 0; }
+  echo "发现新 stable：yt-dlp ${YTDLP_VERSION} → ${latest}，自动更新 pin …" >&2
+  if ! curl -fL --retry 2 --max-time 300 -o "$tmp" \
+      "https://github.com/yt-dlp/yt-dlp/releases/download/${latest}/yt-dlp_macos"; then
+    echo "警告：新版本下载失败，继续用 ${YTDLP_VERSION}" >&2
+    rm -f "$tmp"
+    return 0
+  fi
+  new_sha="$(shasum -a 256 "$tmp" | awk '{print $1}')"
+  rm -f "$tmp"
+  python3 - "$YTDLP_VERSION" "$latest" "$new_sha" <<'PY' || { echo "警告：改写 pin 失败，继续用 ${YTDLP_VERSION}" >&2; return 0; }
+import re, sys
+path = "scripts/build-macos-app.sh"
+old_ver, new_ver, new_sha = sys.argv[1], sys.argv[2], sys.argv[3]
+text = open(path, encoding="utf-8").read()
+text = text.replace(f'YTDLP_VERSION="{old_ver}"', f'YTDLP_VERSION="{new_ver}"', 1)
+text = re.sub(r'YTDLP_MACOS_SHA256="[0-9a-f]{64}"', f'YTDLP_MACOS_SHA256="{new_sha}"', text, count=1)
+open(path, "w", encoding="utf-8").write(text)
+PY
+  echo "已更新 pin：${YTDLP_VERSION} → ${latest}（SHA256 ${new_sha:0:12}…），重新进入构建" >&2
+  rm -f "$PWD/vendor/yt-dlp_macos" 2>/dev/null || true
+  exec bash "$0" "$TARGET"
+}
+
+check_ytdlp_latest
 
 if [ -n "$TARGET" ]; then
   cargo build --release --target "$TARGET"
@@ -106,7 +169,7 @@ fetch_tool() { # url sha256 dest
     exit 1
   fi
   if ! verify_sha "$dest" "$sha"; then
-    echo "错误：$dest 哈希校验失败（预期 $sha）" >&2
+    echo "错误：$dest 哈希校验失败（预期 $sha)" >&2
     rm -f "$dest"
     exit 1
   fi
@@ -117,7 +180,7 @@ if [ "${SKIP_BUNDLED_TOOLS:-0}" = "1" ]; then
 else
   # yt-dlp：官方 macOS 独立二进制（Universal），直接放。
   fetch_tool \
-    "https://github.com/yt-dlp/yt-dlp/releases/download/${YTDLP_VERSION}/yt-dlp_macos" \
+    "$YTDLP_URL" \
     "$YTDLP_MACOS_SHA256" \
     "$VENDOR_DIR/yt-dlp_macos"
   cp "$VENDOR_DIR/yt-dlp_macos" "$BIN_DIR_RES/yt-dlp"
@@ -133,18 +196,14 @@ else
   cp "$VENDOR_DIR/ffmpeg" "$BIN_DIR_RES/ffmpeg"
   chmod +x "$BIN_DIR_RES/ffmpeg"
 
-  if [ ! -f "$VENDOR_DIR/ffprobe" ] || ! verify_sha "$VENDOR_DIR/ffprobe" "$FFPROBE_SHA256"; then
-    fetch_tool "$FFPROBE_URL" "$FFPROBE_SHA256" "$VENDOR_DIR/ffprobe9arm.zip"
-    unzip -o -j -q "$VENDOR_DIR/ffprobe9arm.zip" ffprobe -d "$BIN_DIR_RES"
-    mv "$BIN_DIR_RES/ffprobe" "$VENDOR_DIR/ffprobe"
-    rm -f "$VENDOR_DIR/ffprobe9arm.zip"
-  fi
-  cp "$VENDOR_DIR/ffprobe" "$BIN_DIR_RES/ffprobe"
-  chmod +x "$BIN_DIR_RES/ffprobe"
+  # qjs：yt-dlp 的 JS runtime（消 EJS 警告），~1MB，替代 81MB 的 deno。
+  fetch_tool "$QJS_URL" "$QJS_SHA256" "$VENDOR_DIR/qjs"
+  cp "$VENDOR_DIR/qjs" "$BIN_DIR_RES/qjs"
+  chmod +x "$BIN_DIR_RES/qjs"
 
   # 二进制带了 quarantine 会被 Gatekeeper 拦，删掉确保双击 App 后能直接跑。
   xattr -cr "$BIN_DIR_RES" 2>/dev/null || true
-  echo "已打包：yt-dlp ${YTDLP_VERSION} + ffmpeg/ffprobe（Resources/bin）"
+  echo "已打包：yt-dlp ${YTDLP_VERSION} + ffmpeg + qjs（Resources/bin）"
 fi
 
 # ad-hoc 签名：本机双击即可打开。要分发给别人请换成 Developer ID 并做公证。
