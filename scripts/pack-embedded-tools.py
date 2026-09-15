@@ -20,8 +20,21 @@ import time
 VENDOR = os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, "vendor")
 
 
+def write_size(path: str, size: int) -> None:
+    """记录原始文件的字节数到 `<工具>.size`。
+
+    仓库里只入库 .xz（原始 exe 太大），所以只有 .xz 的克隆拿不到原始文件大小，
+    build.rs 就从这个小文件读——否则运行时解压后的完整性校验会被跳过，
+    两条构建路径产出的 exe 行为就不一致了。
+    """
+    with io.open(path + ".size", "w", encoding="utf-8", newline="") as dst:
+        dst.write(str(size))
+
+
 def pack(path: str) -> None:
     raw_size = os.path.getsize(path)
+    # 无论走不走压缩都要写：.xz 已存在而跳过时，.size 可能是缺的（老版本留下的）
+    write_size(path, raw_size)
     out = path + ".xz"
     # 已经压过且比源文件新就跳过，避免每次构建都白压 98MB
     if os.path.exists(out) and os.path.getmtime(out) >= os.path.getmtime(path):

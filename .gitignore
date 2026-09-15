@@ -1,5 +1,18 @@
+# 构建产物
 /target
-/vendor
+
+# vendor/：只把"能直接内嵌进 exe 的产物"入库，原始 exe 由
+# scripts/fetch-bundled-tools-windows.ps1 从上游取（版本 + SHA256 都 pin 死）。
+#   *.xz      —— 实际内嵌的载荷（Git LFS 托管，见 .gitattributes）
+#   *.version —— 工具版本号，供构建期生成常量
+#   *.size    —— 原始文件的字节数，供解压后完整性校验
+# 原始 .exe 与下载的中间压缩包不入库：二进制在 git 里不做增量，每次升级都会
+# 永久多留一整份（ffmpeg 一份就 98MB），克隆体积会随版本一路涨上去。
+/vendor/*
+!/vendor/*.xz
+!/vendor/*.version
+!/vendor/*.size
+
 .DS_Store
 *.log
 .idea/

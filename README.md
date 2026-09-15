@@ -100,20 +100,33 @@ release 版也写——之前排查「批量全败但零错误记录」的教训
 
 ### Windows
 
-```powershell
-# 先把外置工具取到 vendor/（版本 pin 死 + SHA256 校验），构建时会被内嵌
-powershell -ExecutionPolicy Bypass -File scripts/fetch-bundled-tools-windows.ps1
+前置：仓库用 **Git LFS** 托管内嵌工具的压缩包（`vendor/*.xz`），所以要装 git-lfs
+客户端（`scoop install git-lfs` / `winget install GitHub.GitLFS`，然后 `git lfs install`）。
+
+```bash
+git lfs pull          # 克隆时通常已自动拉取；若 clone 时跳过了 LFS 就手动补一次
 cargo build --release
-# 产物：target/release/WeTube.exe（单文件，含内嵌的 yt-dlp + ffmpeg）
+# 产物：target/release/WeTube.exe（单文件，含内嵌的 yt-dlp + ffmpeg + qjs）
 ```
 
-> **外置工具内嵌（压缩态）**：Windows 版把 `vendor/yt-dlp.exe`、`vendor/ffmpeg.exe`
-> 和 `vendor/qjs.exe` 编进产物，运行时解到 `%LOCALAPPDATA%\WeTube\bin\`（文件名保持
-> **规范名** `ffmpeg.exe` / `yt-dlp.exe` / `qjs.exe`）再执行——对外只有一个 exe。
-> **嵌入的是 xz 压缩态**（`scripts/pack-embedded-tools.py` 生成 `.xz`，构建脚本会
-> 自动调用）：ffmpeg 98MB→26MB，整包从 125MB 降到 48MB；解压只做一次，之后按
-> 解压后大小校验复用，升级会换新文件并清掉旧副本。没跑 fetch 脚本也能构建，只是
-> 不内嵌，运行时退回 exe 同目录 / PATH 查找。`vendor/` 不入库（见 `.gitignore`）。
+只有**升级工具版本**时才需要重新取件（下载到 `vendor/` 并自动压缩）：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/fetch-bundled-tools-windows.ps1
+```
+
+> **外置工具内嵌（压缩态）**：Windows 版把 yt-dlp、ffmpeg、qjs 编进产物，运行时解到
+> `%LOCALAPPDATA%\WeTube\bin\`（文件名保持**规范名** `ffmpeg.exe` / `yt-dlp.exe` /
+> `qjs.exe`）再执行——对外只有一个 exe。**内嵌的是 xz 压缩态**（`scripts/pack-embedded-tools.py`
+> 生成 `.xz`，取件脚本会自动调用）：ffmpeg 98MB→26MB，整包从 125MB 降到 48MB；解压只做
+> 一次，之后按解压后大小校验复用，升级会换新文件并清掉旧副本。没跑取件脚本也能构建，
+> 只是不内嵌，运行时退回 exe 同目录 / PATH 查找。
+>
+> **仓库里放什么**：`vendor/` 下只入库 `*.xz`、`*.version`、`*.size` 三类小文件——
+> 前两者是内嵌载荷与版本号，`*.size` 记录原始文件字节数（只有 `.xz` 的克隆靠它做
+> 解压后完整性校验，保证它与完整 vendor 的构建产物行为一致）。原始 `.exe` 与下载的
+> 中间压缩包都不入库：二进制在 git 里不做增量，每次升级都会永久多留一整份（ffmpeg
+> 一份就 98MB），克隆体积会随版本一路涨上去。`.xz` 走 Git LFS，历史不因此膨胀。
 >
 > ⚠️ 解出的文件名**必须是规范名**：yt-dlp 是被 `--ffmpeg-location` 指到位置后自己
 > 去找 `ffmpeg` 的，名字带了版本号（`ffmpeg-9.0.1.exe`）它就找不到，合并会被静默

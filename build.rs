@@ -102,6 +102,7 @@ fn embed_bundled_tools() {
 
         println!("cargo:rerun-if-changed=vendor/{}", tool.file);
         println!("cargo:rerun-if-changed=vendor/{}.xz", tool.file);
+        println!("cargo:rerun-if-changed=vendor/{}.size", tool.file);
         println!("cargo:rerun-if-changed=vendor/{}", tool.version_file);
 
         if source.is_file() {
@@ -109,9 +110,17 @@ fn embed_bundled_tools() {
             let version = fs::read_to_string(vendor.join(tool.version_file))
                 .map(|value| value.trim().to_string())
                 .unwrap_or_default();
-            // 解压后应有的字节数：用于运行时校验解出的文件完整。原始文件不在
-            // （只留了 .xz）时记 0，运行时跳过大小校验。
-            let raw_size = fs::metadata(&file).map(|meta| meta.len()).unwrap_or(0);
+            // 解压后应有的字节数：用于运行时校验解出的文件完整。
+            // 本地取过工具就直接量原始文件；仓库里只入库 .xz（见 .gitignore /
+            // Git LFS），那种克隆没有原始文件，改读 pack 脚本写的 `<工具>.size`，
+            // 保证两条构建路径的产物行为一致。都没有才记 0（跳过校验）。
+            let raw_size = fs::metadata(&file)
+                .map(|meta| meta.len())
+                .or_else(|_| {
+                    fs::read_to_string(vendor.join(format!("{}.size", tool.file)))
+                        .map(|text| text.trim().parse::<u64>().unwrap_or(0))
+                })
+                .unwrap_or(0);
             code.push_str(&format!(
                 "pub static {}: &[u8] = include_bytes!(r\"{}\");\npub const {}: &str = \"{}\";\npub const {}: bool = {};\npub const {}: u64 = {};\n",
                 tool.bytes_const,
