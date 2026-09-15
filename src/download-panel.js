@@ -507,8 +507,9 @@
         const t = tasks.get(`task:${event.id}`);
         if (!t) break;
         const p = event.progress || {};
-        t.fill.style.width = /^\d+$/.test(String(p.percent).replace("%", "").trim())
-          ? `${parseInt(p.percent, 10)}%`
+        const percent = Number.parseFloat(String(p.percent).trim());
+        t.fill.style.width = Number.isFinite(percent)
+          ? `${Math.max(0, Math.min(100, percent))}%`
           : "50%"; // unknown 时给个中间值动效
         t.left.textContent = `${p.percent || ""}  ${p.speed || ""}${p.eta ? ` · 剩余 ${p.eta}` : ""}`;
         break;
@@ -544,6 +545,10 @@
       }
       case "cancelled": {
         const t = tasks.get(`task:${event.id}`);
+        if (!event.killed) {
+          if (t && t.state === "running") t.left.textContent = "取消未成功，请重试";
+          break;
+        }
         if (t) {
           t.left.textContent = "已取消";
           t.cancel.style.display = "none";

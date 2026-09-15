@@ -324,10 +324,12 @@ pub fn cancel(id: u32) -> bool {
     let Ok(mut map) = CHILDREN.lock() else {
         return false;
     };
-    match map.remove(&id) {
-        Some(mut child) => child.kill().is_ok(),
-        None => false,
+    let Some(child) = map.get_mut(&id) else { return false; };
+    if child.kill().is_err() { return false; }
+    if let Some(mut child) = map.remove(&id) {
+        std::thread::spawn(move || { let _ = child.wait(); });
     }
+    true
 }
 
 /// App 退出时清场：kill 掉所有还在跑的 yt-dlp 子进程。
@@ -733,7 +735,7 @@ pub fn start(
         // 写成 "download:|..." 吐出来的是 "|100.0%|..."，按前缀匹配永远落空。
         .arg("download:WTDL|%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s|%(progress.downloaded_bytes)s|%(progress.total_bytes)s")
         .arg("--print")
-        .arg("after_move:filepath")
+        .arg("after_move:WTPATH|%(filepath)j")
         // --print 隐含 --quiet，会把进度行和 [download]/[Merger] 这些信息行
         // 一起吞掉——进度条与最终文件路径都靠这些行，必须显式关掉静默。
         .arg("--no-quiet")
@@ -776,14 +778,16 @@ pub fn start(
     let format_log = format_id.to_string();
 
     let mut child = cmd.spawn().map_err(|err| format!("启动 yt-dlp 失败：{err}"))?;
-    let pid = child.id();
     let stdout = child.stdout.take().expect("stdout 已 piped");
     let stderr = child.stderr.take().expect("stderr 已 piped");
 
     CHILDREN
         .lock()
         .map_err(|_| "进程表损坏")?
-        .insert(pid, child);
+        .insert(id, child);
+
+    // 两个管道必须同时排空，否则 stderr 填满会阻塞 stdout 的 EOF。
+    let stderr_reader = drain_stderr(stderr);
 
     // 读 stdout：进度行 + 最终文件路径行
     std::thread::spawn(move || {
@@ -792,6 +796,8 @@ pub fn start(
         for line in reader.lines().map_while(Result::ok) {
             if let Some(event) = parse_progress_line(&line) {
                 on_event(event);
+            } else if let Some(path) = parse_final_path(&line) {
+                final_path = Some(path);
             } else if let Some(path) = line.strip_prefix("[Merger] ") {
                 // "[Merger] Merging formats into "xxx.mp4"" → 合并产物路径
                 if let Some(p) = path.split('"').nth(1) {
@@ -817,17 +823,9 @@ pub fn start(
         }
 
         // 等 stderr 排干再收尸，防止管道缓冲把子进程卡死
-        let stderr_text = {
-            let mut buf = String::new();
-            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                buf.push_str(&line);
-                buf.push('\n');
-            }
-            buf
-        };
+        let stderr_text = stderr_reader.join().unwrap_or_default();
 
-        let mut map = CHILDREN.lock().ok();
-        let child = map.as_mut().and_then(|m| m.remove(&pid));
+        let child = CHILDREN.lock().ok().and_then(|mut map| map.remove(&id));
         {
             // ffmpeg 位置尤其关键：给的是文件路径，且必须是规范名
             let ffmpeg_note = match &ffmpeg {
@@ -868,9 +866,87 @@ pub fn start(
     Ok(id)
 }
 
+fn parse_final_path(line: &str) -> Option<String> {
+    serde_json::from_str::<String>(line.strip_prefix("WTPATH|")?).ok()
+}
+
+fn drain_stderr(reader: impl std::io::Read + Send + 'static) -> std::thread::JoinHandle<String> {
+    std::thread::spawn(move || {
+        let mut text = String::new();
+        for line in BufReader::new(reader).lines().map_while(Result::ok) {
+            text.push_str(&line);
+            text.push('\n');
+        }
+        text
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn final_path_uses_tagged_json_not_intermediate_messages() {
+        assert_eq!(
+            parse_final_path(r#"WTPATH|"C:\\Downloads\\中文 video.mp4""#),
+            Some("C:\\Downloads\\中文 video.mp4".to_string())
+        );
+        assert_eq!(parse_final_path("[download] Destination: old.webm"), None);
+        assert_eq!(parse_final_path("WTPATH|invalid"), None);
+    }
+
+    #[test]
+    fn cancellation_fixture() {
+        if std::env::var_os("WETUBE_PIPE_TEST_CHILD").is_some() {
+            use std::io::Write;
+            std::io::stderr().write_all(&vec![b'x'; 1024 * 1024]).unwrap();
+            println!("pipes drained");
+            return;
+        }
+        if std::env::var_os("WETUBE_CANCEL_TEST_CHILD").is_some() {
+            std::thread::sleep(std::time::Duration::from_secs(30));
+        }
+    }
+
+    #[test]
+    fn drains_large_stderr_while_stdout_is_open() {
+        let mut cmd = Command::new(std::env::current_exe().unwrap());
+        cmd.args(["--exact", "download::tests::cancellation_fixture", "--nocapture"])
+            .env("WETUBE_PIPE_TEST_CHILD", "1")
+            .stdout(Stdio::piped()).stderr(Stdio::piped());
+        no_console_window(&mut cmd);
+        let mut child = cmd.spawn().unwrap();
+        let stderr = drain_stderr(child.stderr.take().unwrap());
+        let stdout = child.stdout.take().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let lines: Vec<_> = BufReader::new(stdout).lines().map_while(Result::ok).collect();
+            let _ = tx.send(lines);
+        });
+        let result = rx.recv_timeout(std::time::Duration::from_secs(10));
+        if result.is_err() { let _ = child.kill(); }
+        let status = child.wait().unwrap();
+        let errors = stderr.join().unwrap();
+        assert!(result.unwrap().iter().any(|line| line.contains("pipes drained")));
+        assert!(status.success());
+        assert!(errors.len() >= 1024 * 1024);
+    }
+
+    #[test]
+    fn cancel_uses_task_id_and_reports_missing_tasks() {
+        let mut cmd = Command::new(std::env::current_exe().unwrap());
+        cmd.args(["--exact", "download::tests::cancellation_fixture"])
+            .env("WETUBE_CANCEL_TEST_CHILD", "1")
+            .stdout(Stdio::null()).stderr(Stdio::null());
+        no_console_window(&mut cmd);
+        let child = cmd.spawn().unwrap();
+        let task_id = u32::MAX;
+        assert_ne!(child.id(), task_id);
+        CHILDREN.lock().unwrap().insert(task_id, child);
+        assert!(cancel(task_id));
+        assert!(!CHILDREN.lock().unwrap().contains_key(&task_id));
+        assert!(!cancel(task_id));
+    }
 
     /// 候选名必须覆盖 Windows 的 .exe 形态——旧实现的裸名在 Windows
     /// 上永远匹配不到，这是下载功能失效的根因。
