@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::io::Write as _;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -112,16 +113,36 @@ fn build_window_icon() -> Option<Icon> {
 }
 
 /// 输出错误日志。release 版在 Windows 上没有控制台，直接 eprintln! 会 panic；
-/// 这里只在 stderr 确实是终端（即有控制台）时才写。
+/// 这里同时追加写入日志文件，无论是否有控制台都保证错误被记录。
+///
+/// 日志文件路径：`dirs::data_dir()/WeTube/webrtc.err.log`（macOS 和 Windows 同源）。
+static LOG_FILE: std::sync::Mutex<Option<std::fs::File>> =
+    std::sync::Mutex::new(None);
+
 fn log_err(message: &str) {
-    #[cfg(target_os = "windows")]
-    {
-        use std::io::IsTerminal;
-        if !std::io::stderr().is_terminal() {
-            return;
+    eprintln!("[WeTube] {message}");
+    // 同时在日志文件里写一行（O_APPEND + write_all 在 POSIX 下是原子的）
+    if let Ok(mut guard) = LOG_FILE.lock() {
+        if guard.is_none() {
+            let dir = dirs::data_dir()
+                .map(|base| base.join("WeTube"))
+                .or_else(|| dirs::home_dir().map(|h| h.join("AppData").join("Roaming").join("WeTube")))
+                .or_else(dirs::home_dir);
+            if let Some(dir) = dir {
+                let _ = std::fs::create_dir_all(&dir);
+                if let Ok(f) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(dir.join("webrtc.err.log"))
+                {
+                    *guard = Some(f);
+                }
+            }
+        }
+        if let Some(ref mut file) = guard {
+            let _ = file.write_all(format!("{}\n", message).as_bytes());
         }
     }
-    eprintln!("[WeTube] {message}");
 }
 
 /// 终止类信号处理器：清掉 yt-dlp 子进程后按信号的默认语义退出。
