@@ -517,6 +517,8 @@
       case "done": {
         const t = tasks.get(`task:${event.id}`);
         if (!t) break;
+        // 终态守卫：已完成的任务忽略后续事件
+        if (t.state === "done" || t.state === "failed") break;
         t.state = "done";
         t.el.classList.add("done");
         t.fill.style.width = "100%";
@@ -528,6 +530,8 @@
       case "fail": {
         const t = tasks.get(`task:${event.id}`) || (event.id === 0 ? [...tasks.entries()].find(([, t]) => t.state === "queued")?.[1] : null);
         if (!t) break;
+        // 终态守卫：仅忽略终态，允许覆盖 cancelled 中间状态
+        if (t.state === "done" || t.state === "failed") break;
         t.state = "failed";
         t.left.textContent = event.detail === "已取消" ? "已取消" : "失败";
         if (event.detail && event.detail !== "已取消") {
@@ -545,16 +549,17 @@
       }
       case "cancelled": {
         const t = tasks.get(`task:${event.id}`);
+        if (!t) break;
+        // 终态守卫：已完成的任务忽略取消事件
+        if (t.state === "done" || t.state === "failed") break;
         if (!event.killed) {
-          if (t && t.state === "running") t.left.textContent = "取消未成功，请重试";
+          t.left.textContent = "取消未成功，请重试";
           break;
         }
-        if (t) {
-          t.left.textContent = "已取消";
-          t.cancel.style.display = "none";
-          t.state = "failed";
-          window.__wetubeDlRefreshBadge?.();
-        }
+        t.left.textContent = "已取消";
+        t.cancel.style.display = "none";
+        // 不设置终态，只是中间状态，等待 cleanup 线程的最终结果
+        window.__wetubeDlRefreshBadge?.();
         break;
       }
     }

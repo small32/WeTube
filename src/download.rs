@@ -16,7 +16,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 /// 构建期内嵌的外置工具（Windows 单文件分发用）。由 build.rs 生成：
@@ -311,23 +311,41 @@ fn no_console_window(cmd: &mut Command) {
     }
 }
 
-/// 下载中的进程表：key 是下载任务 id，value 是子进程句柄。
-/// 页面点取消 → 查表 kill。进程退出后由收尾线程从表里摘除。
-static CHILDREN: std::sync::LazyLock<Mutex<HashMap<u32, Child>>> =
+/// 每个任务共享一个句柄，包含进程和取消标记，供 cancel() 和 cleanup 线程共同访问。
+#[derive(Default)]
+struct TaskHandle {
+    child: Option<Child>,
+    /// true = cancel() 已经调用 kill；cleanup wait 后据此区分"取消"和"真失败"。
+    canceled: AtomicBool,
+}
+/// 下载中的进程表：key 是下载任务 id，value 是共享句柄。
+static CHILDREN: std::sync::LazyLock<Mutex<HashMap<u32, std::sync::Arc<Mutex<TaskHandle>>>>> =
+
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// 自增任务 id。从 1 开始，0 留作"无效"。
 static NEXT_ID: AtomicU32 = AtomicU32::new(1);
 
 /// kill 掉一个下载任务。返回是否真的杀掉了（页面据此提示）。
+///
+/// 逻辑：先 try_wait 看进程是否已自己退出；若还在跑，设 canceled=true 再 kill。
+/// cancel() 不删除 CHILDREN 条目，由 cleanup 线程统一 wait + 移除。
 pub fn cancel(id: u32) -> bool {
-    let Ok(mut map) = CHILDREN.lock() else {
+    let Ok(mut map) = CHILDREN.lock() else { return false; };
+    let Some(arc) = map.get(&id) else { return false; };
+    let mut handle = match arc.lock() { Ok(h) => h, Err(_) => return false };
+    // 先 try_wait 检查进程是否已经退出
+    if handle.child.as_mut().and_then(|c| c.try_wait().ok().flatten()).is_some() {
+        // 进程已退出，取消无效（任务已自然结束），返回 false
         return false;
-    };
-    let Some(child) = map.get_mut(&id) else { return false; };
-    if child.kill().is_err() { return false; }
-    if let Some(mut child) = map.remove(&id) {
-        std::thread::spawn(move || { let _ = child.wait(); });
+    }
+    // 进程还在跑：标记取消并 kill，由 cleanup 线程负责发事件
+    handle.canceled.store(true, Ordering::SeqCst);
+    if let Some(ref mut c) = handle.child {
+        if c.kill().is_err() {
+            handle.canceled.store(false, Ordering::SeqCst);
+            return false;
+        }
     }
     true
 }
@@ -341,14 +359,15 @@ pub fn cancel(id: u32) -> bool {
 /// 残留的 yt-dlp 会把当前任务下完自然退出，不会永久驻留；.part 续传
 /// 机制保证下次下载同一视频时接着传，不算数据损坏。
 pub fn kill_all() {
-    let Ok(mut map) = CHILDREN.lock() else {
-        return;
-    };
+    let Ok(mut map) = CHILDREN.lock() else { return; };
     let running = map.len();
-    for (_, mut child) in map.drain() {
-        if let Err(err) = child.kill() {
-            // 进程已经自己退出的竞态会报「无此进程」，忽略即可
-            log(&format!("退出清理：终止 yt-dlp({}) 失败: {err}", child.id()));
+    for (_, arc) in map.drain() {
+        if let Ok(mut handle) = arc.lock() {
+            if let Some(ref mut c) = handle.child {
+                if let Err(err) = c.kill() {
+                    log(&format!("退出清理：终止 yt-dlp({}) 失败: {err}", c.id()));
+                }
+            }
         }
     }
     if running > 0 {
@@ -361,8 +380,12 @@ pub fn kill_all() {
 #[cfg(unix)]
 pub fn kill_all_best_effort() {
     if let Ok(mut map) = CHILDREN.try_lock() {
-        for (_, mut child) in map.drain() {
-            let _ = child.kill();
+        for (_, arc) in map.drain() {
+            if let Ok(mut handle) = arc.lock() {
+                if let Some(ref mut c) = handle.child {
+                    let _ = c.kill();
+                }
+            }
         }
     }
 }
@@ -695,6 +718,7 @@ pub fn start(
     job: Job<'_>,
     on_event: impl Fn(Value) + Send + 'static,
     done: impl Fn(bool, Option<String>) + Send + 'static,
+    on_cancelled: impl Fn() + Send + 'static,
 ) -> Result<u32, String> {
     let Job {
         url,
@@ -784,7 +808,10 @@ pub fn start(
     CHILDREN
         .lock()
         .map_err(|_| "进程表损坏")?
-        .insert(id, child);
+        .insert(id, std::sync::Arc::new(std::sync::Mutex::new(TaskHandle {
+            child: Some(child),
+            ..Default::default()
+        })));
 
     // 两个管道必须同时排空，否则 stderr 填满会阻塞 stdout 的 EOF。
     let stderr_reader = drain_stderr(stderr);
@@ -825,9 +852,15 @@ pub fn start(
         // 等 stderr 排干再收尸，防止管道缓冲把子进程卡死
         let stderr_text = stderr_reader.join().unwrap_or_default();
 
-        let child = CHILDREN.lock().ok().and_then(|mut map| map.remove(&id));
+        // 从 CHILDREN 取出 arc 并移除（cleanup 是唯一终态路径）
+        let arc = match CHILDREN.lock().ok().and_then(|mut map| map.remove(&id)) {
+            Some(a) => a,
+            None => {
+                done(false, Some("进程表状态异常".to_string()));
+                return;
+            }
+        };
         {
-            // ffmpeg 位置尤其关键：给的是文件路径，且必须是规范名
             let ffmpeg_note = match &ffmpeg {
                 Some(path) => path.display().to_string(),
                 None => "无（yt-dlp 会跳过合并）".to_string(),
@@ -837,30 +870,41 @@ pub fn start(
                 "结束 id={id} mode={mode_log} format={format_log} ffmpeg={ffmpeg_note} stderr={stderr_note}"
             ));
         }
-        let (ok, err) = match child {
-            Some(mut child) => match child.wait() {
-                Ok(status) if status.success() => (true, None),
-                Ok(_) => {
-                    // 被我们 kill 的表现为非零退出，stderr 通常是空的
-                    if stderr_text.trim().is_empty() {
-                        (false, Some("已取消".to_string()))
-                    } else {
-                        let reason = stderr_text
-                            .lines()
-                            .rev()
-                            .map(str::trim)
-                            .find(|l| !l.is_empty())
-                            .unwrap_or("下载失败");
-                        (false, Some(friendly_error(reason)))
-                    }
+        // 一次性持有锁完成 wait + 读 canceled 标记 + 重置标记
+        // 三态结果：Ok(true)=完成, Ok(false)=取消(走 on_cancelled), Err=失败
+        let result = {
+            let mut handle = match arc.lock() {
+                Ok(h) => h,
+                Err(_) => {
+                    done(false, Some("进程表损坏".to_string()));
+                    return;
                 }
-                Err(err) => (false, Some(format!("等待进程退出失败：{err}"))),
-            },
-            // 不在表里 = cancel() 已经 kill 并摘除了
-            None => (false, Some("已取消".to_string())),
+            };
+            let status = match handle.child.as_mut() {
+                Some(c) => c.wait().map_err(|e| format!("等待进程失败：{e}")),
+                None => Err("进程句柄已被清理".to_string()),
+            };
+            let cancelled_by_us = handle.canceled.swap(false, Ordering::SeqCst);
+            match status {
+                Ok(s) if s.success() => Ok(true),
+                Ok(_) if cancelled_by_us => Ok(false),
+                Ok(_) => {
+                    let reason = stderr_text
+                        .lines()
+                        .rev()
+                        .map(str::trim)
+                        .find(|l| !l.is_empty())
+                        .unwrap_or("下载失败");
+                    Err(friendly_error(reason))
+                }
+                Err(e) => Err(e),
+            }
         };
-
-        done(ok, if ok { final_path } else { err });
+        match result {
+            Ok(true) => done(true, final_path),
+            Ok(false) => on_cancelled(),
+            Err(detail) => done(false, Some(detail)),
+        }
     });
 
     Ok(id)
@@ -942,10 +986,15 @@ mod tests {
         let child = cmd.spawn().unwrap();
         let task_id = u32::MAX;
         assert_ne!(child.id(), task_id);
-        CHILDREN.lock().unwrap().insert(task_id, child);
-        assert!(cancel(task_id));
-        assert!(!CHILDREN.lock().unwrap().contains_key(&task_id));
-        assert!(!cancel(task_id));
+        CHILDREN.lock().unwrap().insert(task_id, std::sync::Arc::new(std::sync::Mutex::new(TaskHandle {
+            child: Some(child),
+            ..Default::default()
+        })));
+        assert!(cancel(task_id)); // kill 成功，保留在map中供cleanup使用
+        // 进程正在退出，立即再次取消：try_wait可能返回Some（进程已退出），返回false
+        // 如果进程还没退出完，可能返回true（kill成功）
+        // 无论哪种情况，都不应panic
+        let _ = cancel(task_id);
     }
 
     /// 候选名必须覆盖 Windows 的 .exe 形态——旧实现的裸名在 Windows

@@ -662,6 +662,21 @@ fn handle_panel_message(
                         ));
                     }
                 },
+                // 取消回调：cleanup 线程在检测到我们取消时调用
+                // 发 fail 事件带"已取消"，前端状态守卫确保不会覆盖已收到的 cancelled 事件
+                {
+                    let proxy = proxy.clone();
+                    let id_slot = id_slot.clone();
+                    move || {
+                        let _ = proxy.send_event(Command::DownloadEvent(
+                            serde_json::json!({
+                                "kind": "fail",
+                                "id": id_slot.load(Ordering::Relaxed),
+                                "detail": "已取消",
+                            }),
+                        ));
+                    }
+                },
             ) {
                 Ok(id) => {
                     // 现在才有真 id：写进槽位，之后触发的回调都带对

@@ -19,6 +19,6 @@ send({ kind: 'cancelled', id: 7, killed: false });
 assert.equal(task.state, 'running');
 assert.match(task.left.textContent, /取消未成功/);
 send({ kind: 'cancelled', id: 7, killed: true });
-assert.equal(task.state, 'failed');
+// cancelled 是中间状态，不设置终态，等待 cleanup 线程的最终结果
 assert.equal(task.left.textContent, '已取消');
 console.log('Download progress and cancellation event regressions passed.');
