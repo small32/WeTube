@@ -139,7 +139,7 @@ fn log_err(message: &str) {
                 }
             }
         }
-        if let Some(ref mut file) = guard {
+        if let Some(file) = guard.as_mut() {
             let _ = file.write_all(format!("{}\n", message).as_bytes());
         }
     }
