@@ -120,8 +120,7 @@ static LOG_FILE: std::sync::Mutex<Option<std::fs::File>> =
     std::sync::Mutex::new(None);
 
 fn log_err(message: &str) {
-    eprintln!("[WeTube] {message}");
-    // 同时在日志文件里写一行（O_APPEND + write_all 在 POSIX 下是原子的）
+    // 先写文件再写 stderr：stderr 失败不应阻止文件日志写入
     if let Ok(mut guard) = LOG_FILE.lock() {
         if guard.is_none() {
             let dir = dirs::data_dir()
@@ -143,6 +142,8 @@ fn log_err(message: &str) {
             let _ = file.write_all(format!("{}\n", message).as_bytes());
         }
     }
+    // stderr 写失败也不 panic：release 版可能根本没控制台
+    let _ = writeln!(std::io::stderr(), "[WeTube] {message}");
 }
 
 /// 终止类信号处理器：清掉 yt-dlp 子进程后按信号的默认语义退出。
