@@ -256,6 +256,7 @@
 	// ---------------------------------------------------------------- 生命周期
 
 	const active = new Map(); // id → { enabled, config }
+	const syncQueues = new Map(); // id → Promise，同一功能的快速连续改动必须串行
 
 	function shouldRun(id) {
 		const feature = YTE.schema.features.find((item) => item.id === id);
@@ -263,7 +264,18 @@
 		return pageAllowed(feature.pages);
 	}
 
-	async function syncFeature(id, { force = false } = {}) {
+	function syncFeature(id, options = {}) {
+		const previous = syncQueues.get(id) ?? Promise.resolve();
+		const next = previous
+			.catch(() => {})
+			.then(() => syncFeatureNow(id, options));
+		syncQueues.set(id, next);
+		return next.finally(() => {
+			if (syncQueues.get(id) === next) syncQueues.delete(id);
+		});
+	}
+
+	async function syncFeatureNow(id, { force = false } = {}) {
 		const impl = YTE.features[id];
 		if (!impl) return;
 
@@ -276,17 +288,27 @@
 			return;
 		}
 
-		try {
-			if (enabled) {
-				await impl.enable?.(config);
-			} else if (previous?.enabled) {
-				await impl.disable?.(config);
+		// 配置热更新和 SPA 导航都必须先拆掉旧实例。直接重复 enable 会留下旧的
+		// wheel/timeupdate 监听器和 MutationObserver，使一次操作被执行多次；同时
+		// disable 应拿到旧配置，而不是刚写入的新配置。
+		if (previous?.enabled && (force || !enabled)) {
+			try {
+				await impl.disable?.(previous.config);
+			} catch (err) {
+				log(`功能 ${id} 停用失败`, err);
+			} finally {
 				removeListeners(id);
-			} else {
-				return;
 			}
-		} catch (err) {
-			log(`功能 ${id} ${enabled ? "启用" : "停用"}失败`, err);
+		}
+
+		if (enabled) {
+			try {
+				await impl.enable?.(config);
+			} catch (err) {
+				log(`功能 ${id} 启用失败`, err);
+			}
+		} else if (!previous?.enabled) {
+			return;
 		}
 		active.set(id, { enabled, config: clone(config) });
 	}
@@ -315,12 +337,13 @@
   // 导航场景，scheduleResync 自身的 250ms 防抖也保证不抖动。
   let navigateTimer = null;
 
-  function scheduleResync() {
-    clearTimeout(navigateTimer);
-    navigateTimer = setTimeout(() => {
-      void syncAll();
-    }, 250);
-  }
+	  function scheduleResync() {
+	    clearTimeout(navigateTimer);
+	    navigateTimer = setTimeout(() => {
+	      // watch → watch 时配置没变，但播放器、video 节点和当前频道已经变了。
+	      void syncAll({ force: true });
+	    }, 250);
+	  }
 
   function installNavigationHooks() {
     for (const type of ["yt-navigate-start", "yt-navigate-finish", "yt-page-data-updated", "popstate"]) {
