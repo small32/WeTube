@@ -331,7 +331,7 @@ static NEXT_ID: AtomicU32 = AtomicU32::new(1);
 /// 逻辑：先 try_wait 看进程是否已自己退出；若还在跑，设 canceled=true 再 kill。
 /// cancel() 不删除 CHILDREN 条目，由 cleanup 线程统一 wait + 移除。
 pub fn cancel(id: u32) -> bool {
-    let Ok(mut map) = CHILDREN.lock() else { return false; };
+    let Ok(map) = CHILDREN.lock() else { return false; };
     let Some(arc) = map.get(&id) else { return false; };
     let mut handle = match arc.lock() { Ok(h) => h, Err(_) => return false };
     // 先 try_wait 检查进程是否已经退出
@@ -716,9 +716,9 @@ fn parse_progress_line(line: &str) -> Option<Value> {
 /// `formatId` 为空时按 mode 给 yt-dlp 默认选择器。
 pub fn start(
     job: Job<'_>,
-    on_event: impl Fn(Value) + Send + 'static,
-    done: impl Fn(bool, Option<String>) + Send + 'static,
-    on_cancelled: impl Fn() + Send + 'static,
+    on_event: impl Fn(u32, Value) + Send + 'static,
+    done: impl Fn(u32, bool, Option<String>) + Send + 'static,
+    on_cancelled: impl Fn(u32) + Send + 'static,
 ) -> Result<u32, String> {
     let Job {
         url,
@@ -822,7 +822,7 @@ pub fn start(
         let mut final_path: Option<String> = None;
         for line in reader.lines().map_while(Result::ok) {
             if let Some(event) = parse_progress_line(&line) {
-                on_event(event);
+                on_event(id, event);
             } else if let Some(path) = parse_final_path(&line) {
                 final_path = Some(path);
             } else if let Some(path) = line.strip_prefix("[Merger] ") {
@@ -856,7 +856,7 @@ pub fn start(
         let arc = match CHILDREN.lock().ok().and_then(|mut map| map.remove(&id)) {
             Some(a) => a,
             None => {
-                done(false, Some("进程表状态异常".to_string()));
+                done(id, false, Some("进程表状态异常".to_string()));
                 return;
             }
         };
@@ -876,7 +876,7 @@ pub fn start(
             let mut handle = match arc.lock() {
                 Ok(h) => h,
                 Err(_) => {
-                    done(false, Some("进程表损坏".to_string()));
+                    done(id, false, Some("进程表损坏".to_string()));
                     return;
                 }
             };
@@ -901,9 +901,9 @@ pub fn start(
             }
         };
         match result {
-            Ok(true) => done(true, final_path),
-            Ok(false) => on_cancelled(),
-            Err(detail) => done(false, Some(detail)),
+            Ok(true) => done(id, true, final_path),
+            Ok(false) => on_cancelled(id),
+            Err(detail) => done(id, false, Some(detail)),
         }
     });
 

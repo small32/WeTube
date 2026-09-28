@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 use std::error::Error;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::io::Write as _;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -621,9 +621,6 @@ fn handle_panel_message(
                 })
                 .unwrap_or(download::DEFAULT_CONCURRENT_FRAGMENTS);
             let proxy = proxy.clone();
-            // 下载任务 id 在 download::start 内部才分配，而进度回调构造在它
-            // 之前——用一个可写的槽位中转：闭包每次触发时读最新值。
-            let id_slot = std::sync::Arc::new(AtomicU32::new(0));
             match download::start(
                 download::Job {
                     url: &url,
@@ -637,12 +634,11 @@ fn handle_panel_message(
                 // 进度回调：包装上任务标识送回主线程
                 {
                     let proxy = proxy.clone();
-                    let id_slot = id_slot.clone();
-                    move |progress| {
+                    move |id, progress| {
                         let _ = proxy.send_event(Command::DownloadEvent(
                             serde_json::json!({
                                 "kind": "progress",
-                                "id": id_slot.load(Ordering::Relaxed),
+                                "id": id,
                                 "progress": progress,
                             }),
                         ));
@@ -650,13 +646,12 @@ fn handle_panel_message(
                 },
                 {
                     let proxy = proxy.clone();
-                    let id_slot = id_slot.clone();
-                    move |ok, detail| {
+                    move |id, ok, detail| {
                         let kind = if ok { "done" } else { "fail" };
                         let _ = proxy.send_event(Command::DownloadEvent(
                             serde_json::json!({
                                 "kind": kind,
-                                "id": id_slot.load(Ordering::Relaxed),
+                                "id": id,
                                 "detail": detail,
                             }),
                         ));
@@ -666,12 +661,11 @@ fn handle_panel_message(
                 // 发 fail 事件带"已取消"，前端状态守卫确保不会覆盖已收到的 cancelled 事件
                 {
                     let proxy = proxy.clone();
-                    let id_slot = id_slot.clone();
-                    move || {
+                    move |id| {
                         let _ = proxy.send_event(Command::DownloadEvent(
                             serde_json::json!({
                                 "kind": "fail",
-                                "id": id_slot.load(Ordering::Relaxed),
+                                "id": id,
                                 "detail": "已取消",
                             }),
                         ));
@@ -679,8 +673,6 @@ fn handle_panel_message(
                 },
             ) {
                 Ok(id) => {
-                    // 现在才有真 id：写进槽位，之后触发的回调都带对
-                    id_slot.store(id, Ordering::Relaxed);
                     let _ = proxy.send_event(Command::DownloadEvent(
                         serde_json::json!({ "kind": "started", "id": id, "url": url, "mode": mode }),
                     ));
