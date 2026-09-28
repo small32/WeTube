@@ -1,4 +1,4 @@
-//! 把 WeTube 内置浏览器（WebView2）里 youtube.com 的 cookie 导出成 Netscape
+//! 把 WeTube 内置浏览器里 youtube.com 的 cookie 导出成 Netscape
 //! 格式的 cookies.txt，交给 yt-dlp 使用。
 //!
 //! 为什么不直接让 yt-dlp 读 WebView2 的配置目录：
@@ -29,8 +29,7 @@ pub fn cookies_path() -> Option<PathBuf> {
 
 /// 导出过程的诊断日志：写到 cookies.txt 同目录的 cookies.log。
 ///
-/// release 版是 GUI 程序没有终端，`log_err` 那条路看不到东西——出问题时
-/// 只能靠这个文件（用户手动点下载后看一眼就知道导没导出来）。
+/// release 版是 GUI 程序没有终端，排障主要依赖这个文件。
 fn log_line(message: &str) {
     let Some(path) = cookies_path().map(|p| p.with_file_name("cookies.log")) else {
         return;
@@ -68,9 +67,93 @@ pub fn export(webview: &wry::WebView) -> Result<usize, String> {
 }
 
 #[cfg(not(windows))]
-pub fn export(_webview: &wry::WebView) -> Result<usize, String> {
-    // macOS 用 WKWebView，cookie 存法和 WebView2 完全不同，这里不做
-    Err("当前平台不支持导出浏览器 cookie".to_string())
+pub fn export(webview: &wry::WebView) -> Result<usize, String> {
+    let target = cookies_path().ok_or("拿不到用户数据目录")?;
+    let result = portable::export_sync(webview, &target);
+    match &result {
+        Ok(count) => log_line(&format!(
+            "导出成功：{count} 条 -> {}",
+            target.display()
+        )),
+        Err(err) => log_line(&format!("导出失败：{err}")),
+    }
+    result
+}
+
+#[cfg(not(windows))]
+mod portable {
+    use std::io::Write;
+    use std::path::Path;
+
+    /// 一条 cookie 转成 Netscape 格式的一行。**带 Domain 属性的 cookie 必须
+    /// 写成前导点 + 第二列 TRUE**——否则 http.cookiejar 会当成 host-only，
+    /// 请求 `www.youtube.com` 时根本不发这条 cookie，导出的文件等于白写。
+    ///
+    /// 返回空串表示这条不该导出（host-only cookie 拿不到 host，写空 domain
+    /// 反而会让 yt-dlp 解析异常），调用方跳过。
+    pub(super) fn cookie_line(cookie: &wry::cookie::Cookie<'_>) -> String {
+        // cookie 库在 build 时就把前导点剥掉了，所以这里不能再靠
+        // `domain.starts_with('.')` 判断——`domain()` 为 Some 本身就意味着
+        // 这条 cookie 设了 Domain 属性（应作用于子域）。
+        let Some(raw) = cookie.domain().filter(|d| !d.is_empty()) else {
+            return String::new();
+        };
+        let domain = if raw.starts_with('.') {
+            raw.to_string()
+        } else {
+            format!(".{raw}")
+        };
+        let include_sub = "TRUE";
+        let path = cookie.path().unwrap_or("/");
+        let secure = if cookie.secure().unwrap_or(false) {
+            "TRUE"
+        } else {
+            "FALSE"
+        };
+        let expiry = cookie
+            .expires_datetime()
+            .map(|time| time.unix_timestamp())
+            .unwrap_or(0);
+        format!(
+            "{domain}\t{include_sub}\t{path}\t{secure}\t{expiry}\t{}\t{}",
+            cookie.name(),
+            cookie.value(),
+        )
+    }
+
+    fn write_atomic(target: &Path, text: &str) -> std::io::Result<()> {
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let tmp = target.with_extension("tmp");
+        {
+            let mut file = std::fs::File::create(&tmp)?;
+            file.write_all(text.as_bytes())?;
+            file.sync_all()?;
+        }
+        std::fs::rename(&tmp, target)
+    }
+
+    pub(super) fn export_sync(webview: &wry::WebView, target: &Path) -> Result<usize, String> {
+        let cookies = webview
+            .cookies()
+            .map_err(|err| format!("读取内置浏览器 Cookie 失败：{err}"))?;
+        let mut text = String::from("# Netscape HTTP Cookie File\n");
+        for cookie in &cookies {
+            if cookie.name().is_empty() {
+                continue;
+            }
+            let line = cookie_line(cookie);
+            // 空串 = host-only cookie，没有 host 可写，跳过而不是留空 domain 行
+            if line.is_empty() {
+                continue;
+            }
+            text.push_str(&line);
+            text.push('\n');
+        }
+        write_atomic(target, &text).map_err(|err| format!("写 cookies.txt 失败：{err}"))?;
+        Ok(text.lines().count().saturating_sub(1))
+    }
 }
 
 #[cfg(windows)]
@@ -123,7 +206,19 @@ mod imp {
         unsafe { cookie.Expires(&mut expires) }.ok()?;
 
         let domain = pwstr_to_string(domain);
-        let include_sub = if domain.starts_with('.') { "TRUE" } else { "FALSE" };
+        // WebView2 的 Domain 属性既不带前导点，也不区分 host-only / 带 Domain
+        // 属性，拿不到「是否含子域」这个标志。YouTube 的登录态 cookie 本来
+        // 就是 `.youtube.com`（含子域），一律按含子域写：写成 host-only 的话
+        // 请求 www.youtube.com 时这条 cookie 根本不会被发送。
+        if domain.is_empty() {
+            return None;
+        }
+        let domain = if domain.starts_with('.') {
+            domain
+        } else {
+            format!(".{domain}")
+        };
+        let include_sub = "TRUE";
         let secure_flag = if secure.as_bool() { "TRUE" } else { "FALSE" };
         let expiry = if expires > 0.0 { expires as i64 } else { 0 };
         Some(format!(
@@ -212,5 +307,28 @@ mod tests {
             assert_eq!(path.file_name().unwrap(), "cookies.txt");
             assert!(path.parent().unwrap().ends_with("WeTube"));
         }
+    }
+
+    /// host-only cookie（没设 Domain 属性）拿不到 host，不能写出空 domain 的行，
+    /// 否则 yt-dlp 解析到的就是一条域名为空的废条目。
+    #[cfg(not(windows))]
+    #[test]
+    fn portable_cookie_skips_host_only_entries() {
+        let cookie = wry::cookie::Cookie::build(("SID", "secret")).path("/").build();
+        assert_eq!(portable::cookie_line(&cookie), "");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn portable_cookie_uses_netscape_columns() {
+        let cookie = wry::cookie::Cookie::build(("SID", "secret"))
+            .domain(".youtube.com")
+            .path("/")
+            .secure(true)
+            .build();
+        assert_eq!(
+            portable::cookie_line(&cookie),
+            ".youtube.com\tTRUE\t/\tTRUE\t0\tSID\tsecret"
+        );
     }
 }
