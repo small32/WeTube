@@ -6,6 +6,7 @@
 //! 所以加一个配置项只需要改那一个 JSON。
 
 use std::fs;
+use std::io::Write;
 use std::path::PathBuf;
 
 use serde_json::{Map, Value};
@@ -42,15 +43,16 @@ impl ConfigStore {
         let root: Value = fs::read_to_string(&path)
             .ok()
             .and_then(|text| serde_json::from_str(&text).ok())
+            .or_else(|| {
+                fs::read_to_string(path.with_extension("bak"))
+                    .ok()
+                    .and_then(|text| serde_json::from_str(&text).ok())
+            })
             .unwrap_or_default();
 
         let (overrides, shortcuts) = split_saved(root);
 
         Ok(Self { schema, overrides, shortcuts, path })
-    }
-
-    pub fn schema(&self) -> &str {
-        SCHEMA_JSON
     }
 
     /// 默认值打底、用户值覆盖，得到完整配置。
@@ -120,7 +122,29 @@ impl ConfigStore {
             "shortcuts": self.shortcuts,
         });
         let text = serde_json::to_string_pretty(&root)?;
-        fs::write(&self.path, text)?;
+        let tmp = self.path.with_extension("tmp");
+        let mut file = fs::File::create(&tmp)?;
+        file.write_all(text.as_bytes())?;
+        file.sync_all()?;
+        drop(file);
+        #[cfg(windows)]
+        {
+            let backup = self.path.with_extension("bak");
+            if self.path.exists() {
+                if backup.exists() {
+                    fs::remove_file(&backup)?;
+                }
+                fs::rename(&self.path, &backup)?;
+            }
+            if let Err(err) = fs::rename(&tmp, &self.path) {
+                if backup.exists() {
+                    let _ = fs::rename(&backup, &self.path);
+                }
+                return Err(err.into());
+            }
+        }
+        #[cfg(not(windows))]
+        fs::rename(&tmp, &self.path)?;
         Ok(())
     }
 }

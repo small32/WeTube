@@ -65,6 +65,13 @@
 		}
 	}
 
+	function replaceConfig(config) {
+		YTE.config = config;
+		window.__YTE_CONFIG__ = config;
+		void syncAll({ force: true });
+		window.dispatchEvent(new Event("wetube:config-reset"));
+	}
+
 	// ---------------------------------------------------------------- 页面类型
 
 	function pageType() {
@@ -375,7 +382,7 @@
 	if (document.readyState === "loading") {
 		document.addEventListener("DOMContentLoaded", () => void start(), { once: true });
 	} else {
-		void start();
+		queueMicrotask(() => void start());
 	}
 
 	// ---------------------------------------------------------------- 导出
@@ -383,6 +390,7 @@
 	Object.assign(YTE, {
 		cfg,
 		setConfig,
+		replaceConfig,
 		isEnabled,
 		pageType,
 		pageAllowed,

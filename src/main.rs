@@ -15,7 +15,6 @@
 use std::collections::HashMap;
 use std::error::Error;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::io::Write as _;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -29,7 +28,7 @@ use tao::{
 };
 use wry::{
     dpi::{PhysicalPosition, PhysicalSize},
-    http::Request,
+    http::{Request, Uri},
     NewWindowResponse, Rect, RGBA, WebView, WebViewBuilder,
 };
 
@@ -45,6 +44,70 @@ use config::ConfigStore;
 
 const APP_NAME: &str = "WeTube";
 const HOME_URL: &str = "https://www.youtube.com";
+
+/// 仅可信的 YouTube 主页面能调用具有本地副作用的 IPC。
+fn is_trusted_ipc_uri(uri: &Uri) -> bool {
+    uri.scheme_str() == Some("https")
+        && uri.port_u16().is_none_or(|port| port == 443)
+        && uri.host().is_some_and(|host| host == "youtube.com" || host.ends_with(".youtube.com"))
+}
+
+fn is_login_uri(uri: &Uri) -> bool {
+    uri.scheme_str() == Some("https")
+        && uri.port_u16().is_none_or(|port| port == 443)
+        && uri.host() == Some("accounts.google.com")
+}
+
+fn is_allowed_ipc(uri: &Uri, message: &str) -> bool {
+    if is_trusted_ipc_uri(uri) { return true; }
+    if !is_login_uri(uri) { return false; }
+    // 登录页面只能操作窗口/导航，不能读写配置、下载或执行翻译。
+    matches!(message, "back" | "forward" | "reload" | "home" | "window-close"
+        | "window-minimize" | "window-toggle-maximize" | "window-drag" | "fullscreen")
+        || serde_json::from_str::<Value>(message).ok()
+            .is_some_and(|v| v.get("type").and_then(Value::as_str) == Some("app:ready"))
+}
+
+#[cfg(test)]
+mod ipc_origin_tests {
+    use super::*;
+
+    #[test]
+    fn bootstrap_fixture() {
+        if let Some(path) = std::env::var_os("WETUBE_BOOTSTRAP_FIXTURE") {
+            std::fs::write(path, init_script()).unwrap();
+        }
+    }
+
+    #[test]
+    fn login_can_navigate_but_cannot_access_downloads_or_config() {
+        let login: Uri = "https://accounts.google.com/signin".parse().unwrap();
+        for command in ["window-close", "window-drag", "home", "back", r#"{"type":"app:ready","pageId":"test"}"#] {
+            assert!(is_allowed_ipc(&login, command));
+        }
+        for command in [r#"{"type":"config:set"}"#, r#"{"type":"download:start"}"#,
+            r#"{"type":"download:sync"}"#, "open:file:///tmp/example"] {
+            assert!(!is_allowed_ipc(&login, command));
+        }
+        assert!(!is_allowed_ipc(&"https://evil.example".parse().unwrap(), "window-close"));
+    }
+
+    #[test]
+    fn only_https_youtube_origins_can_use_ipc() {
+        for allowed in ["https://www.youtube.com/watch?v=1", "https://music.youtube.com/"] {
+            assert!(is_trusted_ipc_uri(&allowed.parse().unwrap()), "{allowed}");
+        }
+        for denied in [
+            "http://www.youtube.com/",
+            "https://youtube.com.evil.example/",
+            "https://www.youtube.com:8443/",
+            "https://accounts.google.com/",
+            "https://evil.example/",
+        ] {
+            assert!(!is_trusted_ipc_uri(&denied.parse().unwrap()), "{denied}");
+        }
+    }
+}
 #[allow(dead_code)] // 仅 macOS 菜单里 "项目主页" 用到
 const PROJECT_URL: &str = "http://small32.top:8418/winc0/WeTube";
 
@@ -83,7 +146,7 @@ const DEEPDARK_PRESETS_JS: &str = include_str!("enhancer/deepdark-presets.js");
 /// 事件循环里流动的消息：工具栏指令、菜单点击、或设置面板的配置变更。
 #[derive(Debug, Clone)]
 enum Command {
-    Ipc(String),
+    Ipc(String, bool),
     #[cfg(target_os = "macos")]
     Menu(String),
     /// 后台线程翻译完的结果。
@@ -177,7 +240,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     let mut store = ConfigStore::load()?;
-    let init_script = init_script(&store);
+    let init_script = init_script();
 
     let event_loop = EventLoopBuilder::<Command>::with_user_event().build();
 
@@ -223,11 +286,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         let _ = menu_proxy.send_event(Command::Menu(event.id().0.clone()));
     }));
 
-    // 从自定义标题栏"关闭"按钮进来时，事件循环退出要靠这个共享标志触发。
-    // tao 的 Window 没有直接 close()，我们只能让 control_flow = Exit。
-    let window_close_pending = AtomicBool::new(false);
-
-
     let ipc_proxy = event_loop.create_proxy();
     // 翻译请求在后台线程里跑，结果要靠这个 proxy 送回主线程再 eval。
     // ipc_proxy 稍后会被 move 进 IPC 回调，所以这里先克隆一份。
@@ -241,7 +299,17 @@ fn main() -> Result<(), Box<dyn Error>> {
         .with_clipboard(true)
         .with_devtools(cfg!(debug_assertions))
         .with_ipc_handler(move |req: Request<String>| {
-            let _ = ipc_proxy.send_event(Command::Ipc(req.body().to_string()));
+            if is_allowed_ipc(req.uri(), req.body()) {
+                let _ = ipc_proxy.send_event(Command::Ipc(req.body().to_string(), is_trusted_ipc_uri(req.uri())));
+            }
+        })
+        .with_navigation_handler(|url| {
+            let allowed = url.parse::<Uri>().ok()
+                .is_some_and(|uri| is_trusted_ipc_uri(&uri) || is_login_uri(&uri));
+            if !allowed && (url.starts_with("https://") || url.starts_with("http://")) {
+                let _ = open::that(&url);
+            }
+            allowed
         })
         // target="_blank" / window.open 一律交给系统浏览器，别把壳子整个带走。
         .with_new_window_req_handler(|url: String, _features| {
@@ -257,6 +325,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         log_err(&format!("启动时导出 cookie 失败：{err}"));
     }
 
+    let mut download_history = download::EventHistory::default();
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
 
@@ -294,7 +363,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             Event::LoopDestroyed => {
                 download::kill_all();
             }
-            Event::UserEvent(Command::Ipc(msg)) => {
+            Event::UserEvent(Command::Ipc(msg, trusted)) => {
                 debug_log(&format!("指令来源: 页面 IPC → {msg:?}"));
                 if let Some(url) = msg.strip_prefix("open:") {
                     if let Err(err) = open::that(url) {
@@ -303,13 +372,22 @@ fn main() -> Result<(), Box<dyn Error>> {
                     return;
                 }
                 // 设置面板发的是 JSON，工具栏/菜单发的是裸命令字符串。
-                // `window-close` 之类的窗口控制命令不能直接改 control_flow，
-                // 通过共享标志位告诉事件循环自己退。
+                // 关闭指令直接在当前事件结束时退出，不依赖下一次窗口事件。
                 if msg == "window-close" {
-                    window_close_pending.store(true, Ordering::SeqCst);
+                    *control_flow = ControlFlow::Exit;
                     return;
                 }
                 match serde_json::from_str::<Value>(&msg) {
+                    Ok(payload) if payload["type"] == "app:ready" => {
+                        let config = if trusted { store.full_config() } else { serde_json::json!({}) };
+                        eval(&webview, &format!("window.__wetubeBootstrap?.({}, {}, {}, {});",
+                            payload["pageId"], config, shortcuts::registry_json(store.shortcuts()), trusted));
+                        sync_fullscreen_chrome(&window, &webview);
+                    }
+                    Ok(payload) if payload["type"] == "download:sync" && trusted => {
+                        eval(&webview, &format!("window.__wetubeDownloadEvent?.({});",
+                            serde_json::json!({"kind":"snapshot", "events":download_history.snapshot()})));
+                    }
                     Ok(Value::Object(payload)) => handle_panel_message(
                         &mut store,
                         &webview,
@@ -321,6 +399,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 }
             }
             Event::UserEvent(Command::DownloadEvent(event)) => {
+                download_history.record(&event);
                 // 下载事件统一从这里 eval 给页面；serde_json 保证生成的
                 // 是合法 JS 字面量，路径里有什么怪字符都不会破坏语法。
                 eval(
@@ -387,9 +466,6 @@ Event::UserEvent(Command::Menu(id)) => {
             _ => {}
         }
 
-        if window_close_pending.load(Ordering::SeqCst) {
-            *control_flow = ControlFlow::Exit;
-        }
     });
 }
 
@@ -505,7 +581,7 @@ fn handle_panel_message(
                 log_err(&format!("重置设置失败: {err}"));
             }
             let script = format!(
-                "window.__YTE_CONFIG__ = {}; window.__YTE.syncAll({{force:true}});",
+                "window.__YTE?.replaceConfig({});",
                 store.full_config()
             );
             eval(webview, &script);
@@ -560,6 +636,8 @@ fn handle_panel_message(
             });
         }
         Some("download:start") => {
+            let request_id = payload.get("requestId").and_then(Value::as_str).unwrap_or("").to_string();
+            let title = payload.get("title").and_then(Value::as_str).unwrap_or("").to_string();
             let (Some(url), Some(mode)) = (
                 payload.get("url").and_then(Value::as_str),
                 payload.get("mode").and_then(Value::as_str),
@@ -631,6 +709,17 @@ fn handle_panel_message(
                     concurrent,
                     cookies: &cookies,
                 },
+                {
+                    let proxy = proxy.clone();
+                    let url = url.clone();
+                    let mode = mode.clone();
+                    let request_id = request_id.clone();
+                    move |id| {
+                        let _ = proxy.send_event(Command::DownloadEvent(
+                            serde_json::json!({ "kind": "started", "id": id, "url": url, "mode": mode, "requestId":request_id, "title":title }),
+                        ));
+                    }
+                },
                 // 进度回调：包装上任务标识送回主线程
                 {
                     let proxy = proxy.clone();
@@ -672,14 +761,10 @@ fn handle_panel_message(
                     }
                 },
             ) {
-                Ok(id) => {
-                    let _ = proxy.send_event(Command::DownloadEvent(
-                        serde_json::json!({ "kind": "started", "id": id, "url": url, "mode": mode }),
-                    ));
-                }
+                Ok(_) => {}
                 Err(err) => {
                     let _ = proxy.send_event(Command::DownloadEvent(
-                        serde_json::json!({ "kind": "fail", "id": 0, "detail": err }),
+                        serde_json::json!({ "kind": "fail", "id": 0, "detail": err, "requestId":request_id }),
                     ));
                 }
             }
@@ -998,23 +1083,33 @@ fn background_color() -> RGBA {
 ///
 /// titlebar.js 在 ui.js 之前注入——前者依赖图标的 inline 注入先完成，
 /// 后者再往 `document.body` 追加工具栏。
-fn init_script(store: &ConfigStore) -> String {
+fn init_script() -> String {
     format!(
-        "window.__YTE_SCHEMA__ = {schema};\n\
-         window.__YTE_CONFIG__ = {config};\n\
+        "(() => {{\n\
+         const pageId = Array.from(crypto.getRandomValues(new Uint32Array(4))).join('-');\n\
+         window.__WETUBE_PAGE_ID__ = pageId;\n\
+         let booted = false;\n\
+         window.__wetubeBootstrap = (id, config, shortcuts, trusted) => {{\n\
+         if (id !== pageId || booted) return; booted = true;\n\
+         window.__YTE_SCHEMA__ = {schema};\n\
+         window.__YTE_CONFIG__ = config;\n\
          window.__WETUBE_PLATFORM__ = \"{platform}\";\n\
-         window.__WETUBE_SHORTCUTS__ = {shortcuts};\n\
+         window.__WETUBE_SHORTCUTS__ = shortcuts;\n\
          {presets}\n\
          {assets}\n\
          {titlebar}\n\
          {toolbar}\n\
+         if (!trusted) return;\n\
          {enhancer}\n\
          {shortcut_panel}\n\
-         {download_panel}\n",
-        schema = js_literal(store.schema()),
-        config = js_literal(&store.full_config().to_string()),
+         {download_panel}\n\
+         }};\n\
+         const ready = () => window.ipc.postMessage(JSON.stringify({{type:'app:ready', pageId}}));\n\
+         if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', ready, {{once:true}});\n\
+         else ready();\n\
+         }})();",
+        schema = js_literal(config::SCHEMA_JSON),
         platform = PLATFORM,
-        shortcuts = shortcuts::registry_json(store.shortcuts()),
         presets = DEEPDARK_PRESETS_JS,
         assets = ENHANCER_ASSETS_JS,
         titlebar = TITLEBAR_JS,

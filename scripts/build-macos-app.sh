@@ -4,6 +4,7 @@
 #   ./scripts/build-macos-app.sh            # 打本机架构
 #   ./scripts/build-macos-app.sh aarch64-apple-darwin
 #   ./scripts/build-macos-app.sh x86_64-apple-darwin
+# Intel 构建需在构建机上安装 x86_64 版 ffmpeg 与 qjs（或 Universal 版）。
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -186,20 +187,41 @@ else
   cp "$VENDOR_DIR/yt-dlp_macos" "$BIN_DIR_RES/yt-dlp"
   chmod +x "$BIN_DIR_RES/yt-dlp"
 
-  # ffmpeg/ffprobe：osxexperts 的 zip 里就是裸二进制，解出来放。
-  if [ ! -f "$VENDOR_DIR/ffmpeg" ] || ! verify_sha "$VENDOR_DIR/ffmpeg" "$FFMPEG_SHA256"; then
-    fetch_tool "$FFMPEG_URL" "$FFMPEG_SHA256" "$VENDOR_DIR/ffmpeg9arm.zip"
-    unzip -o -j -q "$VENDOR_DIR/ffmpeg9arm.zip" ffmpeg -d "$BIN_DIR_RES"
-    mv "$BIN_DIR_RES/ffmpeg" "$VENDOR_DIR/ffmpeg"
-    rm -f "$VENDOR_DIR/ffmpeg9arm.zip"
-  fi
-  cp "$VENDOR_DIR/ffmpeg" "$BIN_DIR_RES/ffmpeg"
-  chmod +x "$BIN_DIR_RES/ffmpeg"
+  BUILD_ARCH="${TARGET:-$(uname -m)}"
+  LIB_ARGS=()
+  if [ "$BUILD_ARCH" = "x86_64-apple-darwin" ] || [ "$BUILD_ARCH" = "x86_64" ]; then
+    TOOL_ARCH="x86_64"
+    # ARM 下载地址不能打进 Intel 包；从构建机取兼容的工具，并检查实际架构。
+    for tool in ffmpeg qjs; do
+      tool_path="$(command -v "$tool" || true)"
+      if [ -z "$tool_path" ] || ! lipo -archs "$tool_path" 2>/dev/null | grep -qw x86_64; then
+        echo "错误：构建 Intel 包需要可执行的 x86_64 $tool（当前：${tool_path:-未安装}）" >&2
+        exit 1
+      fi
+      cp "$tool_path" "$BIN_DIR_RES/$tool"
+      chmod +x "$BIN_DIR_RES/$tool"
+      LIB_ARGS+=("--${tool}-source" "$tool_path")
+    done
+  else
+    TOOL_ARCH="arm64"
+    # ffmpeg/ffprobe：osxexperts 的 zip 里就是 ARM 裸二进制。
+    if [ ! -f "$VENDOR_DIR/ffmpeg" ] || ! verify_sha "$VENDOR_DIR/ffmpeg" "$FFMPEG_SHA256"; then
+      fetch_tool "$FFMPEG_URL" "$FFMPEG_SHA256" "$VENDOR_DIR/ffmpeg9arm.zip"
+      unzip -o -j -q "$VENDOR_DIR/ffmpeg9arm.zip" ffmpeg -d "$BIN_DIR_RES"
+      mv "$BIN_DIR_RES/ffmpeg" "$VENDOR_DIR/ffmpeg"
+      rm -f "$VENDOR_DIR/ffmpeg9arm.zip"
+    fi
+    cp "$VENDOR_DIR/ffmpeg" "$BIN_DIR_RES/ffmpeg"
+    chmod +x "$BIN_DIR_RES/ffmpeg"
 
-  # qjs：yt-dlp 的 JS runtime（消 EJS 警告），~1MB，替代 81MB 的 deno。
-  fetch_tool "$QJS_URL" "$QJS_SHA256" "$VENDOR_DIR/qjs"
-  cp "$VENDOR_DIR/qjs" "$BIN_DIR_RES/qjs"
-  chmod +x "$BIN_DIR_RES/qjs"
+    # qjs：yt-dlp 的 JS runtime（消 EJS 警告）。
+    fetch_tool "$QJS_URL" "$QJS_SHA256" "$VENDOR_DIR/qjs"
+    cp "$VENDOR_DIR/qjs" "$BIN_DIR_RES/qjs"
+    chmod +x "$BIN_DIR_RES/qjs"
+  fi
+
+  # 收齐 Homebrew 等动态构建的传递依赖，并改成包内相对引用。
+  python3 scripts/bundle-macos-libs.py "$BIN_DIR_RES" "$TOOL_ARCH" ${LIB_ARGS[@]+"${LIB_ARGS[@]}"}
 
   # 二进制带了 quarantine 会被 Gatekeeper 拦，删掉确保双击 App 后能直接跑。
   xattr -cr "$BIN_DIR_RES" 2>/dev/null || true

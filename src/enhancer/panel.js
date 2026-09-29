@@ -22,6 +22,14 @@
 		window.__YTE_PAGE_ERROR__ = `未处理的 Promise 拒绝: ${event.reason}`;
 	});
 	let root = null;
+	window.addEventListener("wetube:config-reset", () => {
+		if (!root) return;
+		const visible = root.style.display !== "none";
+		closePanel();
+		root.remove();
+		root = null;
+		if (visible) openPanel();
+	});
 
 	// ---------------------------------------------------------------- 样式
 
@@ -312,8 +320,7 @@
 		const reset = el("button", { text: "全部重置为默认" });
 		reset.addEventListener("click", () => {
 			if (!confirm("把所有设置恢复成默认值？")) return;
-			YTE.post({ type: "config:reset" });
-			location.reload();
+				YTE.post({ type: "config:reset" });
 		});
 
 		const total = (YTE.schema.features ?? []).reduce((sum, feature) => sum + (feature.fields?.length ?? 0), 0);

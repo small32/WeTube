@@ -228,12 +228,11 @@ mod imp {
         ))
     }
 
-    fn netscape(list: &ICoreWebView2CookieList) -> String {
+    fn netscape(list: &ICoreWebView2CookieList) -> Result<String, String> {
         let mut text = String::from("# Netscape HTTP Cookie File\n");
         let mut count = 0u32;
-        if unsafe { list.Count(&mut count) }.is_err() {
-            return text;
-        }
+        unsafe { list.Count(&mut count) }
+            .map_err(|err| format!("读取 Cookie 数量失败：{err}"))?;
         for index in 0..count {
             let Ok(cookie) = (unsafe { list.GetValueAtIndex(index) }) else {
                 continue;
@@ -243,7 +242,7 @@ mod imp {
                 text.push('\n');
             }
         }
-        text
+        Ok(text)
     }
 
     fn write_atomic(target: &Path, text: &str) -> std::io::Result<()> {
@@ -256,8 +255,20 @@ mod imp {
             file.write_all(text.as_bytes())?;
             file.sync_all()?;
         }
-        let _ = std::fs::remove_file(target);
-        std::fs::rename(&tmp, target)
+        let backup = target.with_extension("bak");
+        if target.exists() {
+            if backup.exists() {
+                std::fs::remove_file(&backup)?;
+            }
+            std::fs::rename(target, &backup)?;
+        }
+        if let Err(err) = std::fs::rename(&tmp, target) {
+            if backup.exists() {
+                let _ = std::fs::rename(&backup, target);
+            }
+            return Err(err);
+        }
+        Ok(())
     }
 
     pub(super) fn export_sync(webview: &wry::WebView, target: &Path) -> Result<usize, String> {
@@ -270,7 +281,7 @@ mod imp {
             .map_err(|err| format!("取 CookieManager 失败：{err}"))?;
 
         // 回调在同线程触发，用 Rc<RefCell> 把结果带回来即可（不跨线程）
-        let text = Rc::new(RefCell::new(String::new()));
+        let text = Rc::new(RefCell::new(None::<Result<String, String>>));
         let sink = Rc::clone(&text);
 
         GetCookiesCompletedHandler::wait_for_async_operation(
@@ -280,17 +291,18 @@ mod imp {
                     .map_err(webview2_com::Error::WindowsError)
             }),
             Box::new(move |error, list| {
-                if error.is_ok() {
-                    if let Some(list) = list {
-                        *sink.borrow_mut() = netscape(&list);
-                    }
-                }
+                *sink.borrow_mut() = Some(match (error, list) {
+                    (Ok(_), Some(list)) => netscape(&list),
+                    (Err(err), _) => Err(format!("查询 Cookie 失败：{err:?}")),
+                    (_, None) => Err("查询 Cookie 未返回列表".to_string()),
+                });
                 Ok(())
             }),
         )
         .map_err(|err| format!("等待 cookie 查询返回失败：{err}"))?;
 
-        let text = text.borrow().clone();
+        let text = text.borrow_mut().take()
+            .ok_or("查询 Cookie 没有回调")??;
         write_atomic(target, &text).map_err(|err| format!("写 cookies.txt 失败：{err}"))?;
         Ok(text.lines().count().saturating_sub(1))
     }

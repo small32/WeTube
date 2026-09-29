@@ -315,8 +315,33 @@ fn no_console_window(cmd: &mut Command) {
 #[derive(Default)]
 struct TaskHandle {
     child: Option<Child>,
+    process_group: bool,
     /// true = cancel() 已经调用 kill；cleanup wait 后据此区分"取消"和"真失败"。
     canceled: AtomicBool,
+}
+
+fn terminate_tree(child: &mut Child, process_group: bool) -> std::io::Result<()> {
+    #[cfg(unix)]
+    if process_group {
+        // 每次下载使用独立进程组，ffmpeg 等后代继承同一组。
+        let result = unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
+        return if result == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) };
+    }
+    #[cfg(windows)]
+    {
+        let _ = process_group;
+        let executable = std::env::var_os("SystemRoot")
+            .map(|root| std::path::PathBuf::from(root).join("System32").join("taskkill.exe"))
+            .unwrap_or_else(|| "taskkill.exe".into());
+        let mut cmd = Command::new(executable);
+        cmd.args(["/PID", &child.id().to_string(), "/T", "/F"])
+            .stdout(Stdio::null()).stderr(Stdio::null());
+        no_console_window(&mut cmd);
+        return if cmd.status()?.success() { Ok(()) }
+            else { Err(std::io::Error::other("taskkill 未能终止下载进程树")) };
+    }
+    #[cfg(not(windows))]
+    child.kill()
 }
 /// 下载中的进程表：key 是下载任务 id，value 是共享句柄。
 static CHILDREN: std::sync::LazyLock<Mutex<HashMap<u32, std::sync::Arc<Mutex<TaskHandle>>>>> =
@@ -325,6 +350,39 @@ static CHILDREN: std::sync::LazyLock<Mutex<HashMap<u32, std::sync::Arc<Mutex<Tas
 
 /// 自增任务 id。从 1 开始，0 留作"无效"。
 static NEXT_ID: AtomicU32 = AtomicU32::new(1);
+
+/// 主线程保留下载状态，页面重建时重放 started + 最新进度/终态。
+#[derive(Default)]
+pub struct EventHistory {
+    tasks: std::collections::BTreeMap<u64, Vec<Value>>,
+}
+
+impl EventHistory {
+    pub fn record(&mut self, event: &Value) {
+        let Some(id) = event["id"].as_u64().filter(|id| *id != 0) else { return; };
+        match event["kind"].as_str() {
+            Some("started") => { self.tasks.entry(id).or_insert_with(|| vec![event.clone()]); }
+            Some("progress" | "done" | "fail" | "cancelled") => {
+                if let Some(events) = self.tasks.get_mut(&id) {
+                    if events.last().is_some_and(|e| e["kind"] == "done" || e["kind"] == "fail") { return; }
+                    events.truncate(1);
+                    events.push(event.clone());
+                }
+            }
+            _ => return,
+        }
+        let finished: Vec<_> = self.tasks.iter().filter(|(_, events)| {
+            events.last().is_some_and(|e| e["kind"] == "done" || e["kind"] == "fail")
+        }).map(|(id, _)| *id).collect();
+        for id in finished.iter().take(finished.len().saturating_sub(100)) {
+            self.tasks.remove(id);
+        }
+    }
+
+    pub fn snapshot(&self) -> Vec<Value> {
+        self.tasks.values().flatten().cloned().collect()
+    }
+}
 
 /// kill 掉一个下载任务。返回是否真的杀掉了（页面据此提示）。
 ///
@@ -341,8 +399,9 @@ pub fn cancel(id: u32) -> bool {
     }
     // 进程还在跑：标记取消并 kill，由 cleanup 线程负责发事件
     handle.canceled.store(true, Ordering::SeqCst);
+    let process_group = handle.process_group;
     if let Some(ref mut c) = handle.child {
-        if c.kill().is_err() {
+        if terminate_tree(c, process_group).is_err() {
             handle.canceled.store(false, Ordering::SeqCst);
             return false;
         }
@@ -363,8 +422,9 @@ pub fn kill_all() {
     let running = map.len();
     for (_, arc) in map.drain() {
         if let Ok(mut handle) = arc.lock() {
+            let process_group = handle.process_group;
             if let Some(ref mut c) = handle.child {
-                if let Err(err) = c.kill() {
+                if let Err(err) = terminate_tree(c, process_group) {
                     log(&format!("退出清理：终止 yt-dlp({}) 失败: {err}", c.id()));
                 }
             }
@@ -382,8 +442,9 @@ pub fn kill_all_best_effort() {
     if let Ok(mut map) = CHILDREN.try_lock() {
         for (_, arc) in map.drain() {
             if let Ok(mut handle) = arc.lock() {
+                let process_group = handle.process_group;
                 if let Some(ref mut c) = handle.child {
-                    let _ = c.kill();
+                    let _ = terminate_tree(c, process_group);
                 }
             }
         }
@@ -716,6 +777,7 @@ fn parse_progress_line(line: &str) -> Option<Value> {
 /// `formatId` 为空时按 mode 给 yt-dlp 默认选择器。
 pub fn start(
     job: Job<'_>,
+    on_started: impl Fn(u32),
     on_event: impl Fn(u32, Value) + Send + 'static,
     done: impl Fn(u32, bool, Option<String>) + Send + 'static,
     on_cancelled: impl Fn(u32) + Send + 'static,
@@ -801,6 +863,11 @@ pub fn start(
     let mode_log = mode.to_string();
     let format_log = format_id.to_string();
 
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
     let mut child = cmd.spawn().map_err(|err| format!("启动 yt-dlp 失败：{err}"))?;
     let stdout = child.stdout.take().expect("stdout 已 piped");
     let stderr = child.stderr.take().expect("stderr 已 piped");
@@ -810,11 +877,15 @@ pub fn start(
         .map_err(|_| "进程表损坏")?
         .insert(id, std::sync::Arc::new(std::sync::Mutex::new(TaskHandle {
             child: Some(child),
+            process_group: cfg!(unix),
             ..Default::default()
         })));
 
     // 两个管道必须同时排空，否则 stderr 填满会阻塞 stdout 的 EOF。
     let stderr_reader = drain_stderr(stderr);
+
+    // 必须先入队 started，再允许工作线程发送进度或终态事件。
+    on_started(id);
 
     // 读 stdout：进度行 + 最终文件路径行
     std::thread::spawn(move || {
@@ -950,6 +1021,50 @@ mod tests {
         if std::env::var_os("WETUBE_CANCEL_TEST_CHILD").is_some() {
             std::thread::sleep(std::time::Duration::from_secs(30));
         }
+    }
+
+    #[test]
+    fn history_replays_latest_state_and_preserves_terminal_result() {
+        let mut history = EventHistory::default();
+        let started = serde_json::json!({"kind":"started","id":7,"requestId":"page:2","title":"Video B"});
+        history.record(&started);
+        for percent in [10, 20, 70] {
+            history.record(&serde_json::json!({"kind":"progress","id":7,"progress":{"percent":percent}}));
+        }
+        let snapshot = history.snapshot();
+        assert_eq!(snapshot.len(), 2);
+        assert_eq!(snapshot[0], started);
+        assert_eq!(snapshot[1]["progress"]["percent"], 70);
+        let done = serde_json::json!({"kind":"done","id":7,"detail":"saved.mp4"});
+        history.record(&done);
+        history.record(&serde_json::json!({"kind":"cancelled","id":7,"killed":false}));
+        assert_eq!(history.snapshot(), vec![started, done]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cancellation_closes_descendant_stdout_too() {
+        use std::os::unix::process::CommandExt;
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "sleep 30 & printf 'ready\\n'; wait"])
+            .process_group(0).stdout(Stdio::piped()).spawn().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut reader = BufReader::new(stdout);
+            let mut line = String::new();
+            let _ = reader.read_line(&mut line);
+            let _ = tx.send(line);
+            let _ = reader.read_line(&mut String::new());
+            let _ = tx.send("eof".to_string());
+        });
+        let ready = rx.recv_timeout(std::time::Duration::from_secs(5));
+        let killed = terminate_tree(&mut child, true);
+        let eof = rx.recv_timeout(std::time::Duration::from_secs(5));
+        let _ = child.wait();
+        assert_eq!(ready.unwrap(), "ready\n");
+        killed.unwrap();
+        assert_eq!(eof.unwrap(), "eof");
     }
 
     #[test]

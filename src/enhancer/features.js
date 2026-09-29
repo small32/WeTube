@@ -443,7 +443,12 @@
 		enable() {
 			const clean = () => {
 				const input = document.querySelector("#share-url-container input, tp-yt-paper-input input");
-				if (input?.value) input.value = input.value.split("?")[0];
+				if (!input?.value) return;
+				try {
+					const url = new URL(input.value);
+					for (const key of ["si", "feature", "utm_source", "utm_medium", "utm_campaign"]) url.searchParams.delete(key);
+					input.value = url.href;
+				} catch { /* 保留无法解析的输入 */ }
 			};
 			watchMutations(F.shareShortener, clean, { childList: true, subtree: true, attributes: true });
 			clean();
@@ -924,6 +929,8 @@
 	const SUBTITLE_BUTTON_ID = "yte-subtitle-translate-btn";
 
 	const subtitleState = {
+		generation: 0,
+		controller: null,
 		// 引擎开关（控制栏按钮控制）。SPA 内跨视频保留：开了之后切视频继续翻译，
 		// 应用重启后回到关闭状态。
 		on: false,
@@ -957,7 +964,7 @@
 		cueVideoId: "",
 		cueTrackHash: "",
 		batchId: 0,
-		batchIndexById: {}, // 批量请求 id -> 块起始下标
+		batchIndexById: {}, // 批量请求 id -> { 块起点, 发起时的字幕数组 }
 		pendingBatches: 0, // 在途批量块数
 		translatedCount: 0,
 		timeHandler: null,
@@ -1052,7 +1059,7 @@
 	}
 
 	function sendTranslate(text) {
-		const id = String((subtitleState.seq += 1));
+		const id = subtitleRequestId("line", ++subtitleState.seq);
 		subtitleState.lastSent = text;
 		subtitleState.lastSentAt = Date.now();
 		subtitleState.sent += 1;
@@ -1200,12 +1207,17 @@
 	/** 按钮主开关：开就启动翻译引擎，关就停掉；按钮态即时反映。 */
 	async function toggleEngine() {
 		if (subtitleState.on) {
+			subtitleState.on = false;
 			stopEngine();
 		} else {
-			const ok = await startEngine();
-			if (!ok) return; // 找不到字幕容器等情况：保持关闭，别给假开态
+			subtitleState.on = true;
+			updateButton();
+			const pending = startEngine();
+			const generation = subtitleState.generation;
+			const ok = await pending;
+			if (generation !== subtitleState.generation) return;
+			if (!ok) subtitleState.on = false;
 		}
-		subtitleState.on = !subtitleState.on;
 		updateButton();
 	}
 
@@ -1388,13 +1400,13 @@
 	}
 
 	/** 拉取当前视频的字幕轨道并解析成 cue 时间轴。失败抛错，由调用方回落 DOM 模式。 */
-	async function loadTrackCues() {
+	async function loadTrackCues(signal) {
 		const data = getPlayerDataSnapshot();
 		if (!data) throw new Error("播放器 API 不可用");
 		const track = selectCaptionTrack(data);
 		if (!track) throw new Error("没有可用字幕轨道");
 		const url = buildTrackUrl(data, track);
-		const resp = await fetch(url);
+		const resp = await fetch(url, { signal });
 		if (!resp.ok) throw new Error(`字幕轨道 HTTP ${resp.status}`);
 		const json = await resp.json();
 		const events = filterNoiseFromEvents(json.events ?? []);
@@ -1502,6 +1514,10 @@
 		return result;
 	}
 
+	function subtitleRequestId(kind, seq) {
+		return `${window.__WETUBE_PAGE_ID__}:${subtitleState.generation}:${kind}:${seq}`;
+	}
+
 	/** 把 cue 时间轴分块送去批量翻译（Edge 接口按位对应）。 */
 	function translateAllCues() {
 		const cues = subtitleState.cues;
@@ -1510,8 +1526,8 @@
 		subtitleState.pendingBatches = 0;
 		for (let offset = 0; offset < cues.length; offset += BATCH) {
 			const texts = cues.slice(offset, offset + BATCH).map((cue) => cue.text);
-			const id = String((subtitleState.batchId += 1));
-			subtitleState.batchIndexById[id] = offset;
+			const id = subtitleRequestId("batch", ++subtitleState.batchId);
+			subtitleState.batchIndexById[id] = { offset, cues };
 			subtitleState.pendingBatches += 1;
 			try {
 				window.ipc.postMessage(
@@ -1531,13 +1547,12 @@
 
 	/** 批量结果回传：按位写回 cue.translated，当前正显示的 cue 立即刷新。 */
 	window.__wetubeOnSubtitleBatchTranslated = (id, results) => {
-		subtitleState.pendingBatches = Math.max(0, subtitleState.pendingBatches - 1);
-		const offset = subtitleState.batchIndexById[String(id)];
+		const batch = subtitleState.batchIndexById[String(id)];
 		delete subtitleState.batchIndexById[String(id)];
-		const cues = subtitleState.cues;
-		if (!cues || offset == null || !Array.isArray(results)) return;
+		if (!batch || batch.cues !== subtitleState.cues || !Array.isArray(results)) return;
+		subtitleState.pendingBatches = Math.max(0, subtitleState.pendingBatches - 1);
 		results.forEach((text, index) => {
-			const cue = cues[offset + index];
+			const cue = batch.cues[batch.offset + index];
 			if (cue && typeof text === "string" && text) {
 				cue.translated = text;
 				subtitleState.translatedCount += 1;
@@ -1620,8 +1635,14 @@
 	 * 幂等：已在跑且容器还连着时直接成功返回。
 	 */
 	async function startEngine() {
-		const player = subtitleState.player ?? (await waitForPlayer());
-		if (!player) return false;
+		stopEngine();
+		const generation = subtitleState.generation;
+		const pageUrl = location.href;
+		const current = () => generation === subtitleState.generation && location.href === pageUrl;
+		const controller = new AbortController();
+		subtitleState.controller = controller;
+		const player = await waitForPlayer();
+		if (!player || !current()) return false;
 		subtitleState.player = player;
 
 		// 译文层两种模式共用：轨道模式也要画，必须在分支前创建。
@@ -1636,9 +1657,14 @@
 
 		// ---- 轨道模式优先（read-frog 路线）：CC 不开也能翻 ----
 		try {
-			const loaded = await loadTrackCues();
+			const loaded = await loadTrackCues(controller.signal);
+			if (!current()) return false;
+			const urlId = new URL(location.href).searchParams.get("v")
+				|| location.pathname.match(/^\/shorts\/([^/]+)/)?.[1];
+			if (urlId && loaded.videoId !== urlId) return false;
 			const sameVideo =
-				subtitleState.cues && subtitleState.cueVideoId === loaded.videoId;
+				subtitleState.cues && subtitleState.cueVideoId === loaded.videoId
+				&& subtitleState.cueTrackHash === loaded.hash;
 			if (!sameVideo) {
 				subtitleState.cues = loaded.cues;
 				subtitleState.cueVideoId = loaded.videoId;
@@ -1665,6 +1691,7 @@
 			log(`轨道模式：${loaded.cues.length} 条 cue，批量块 ${subtitleState.pendingBatches}`);
 			return true;
 		} catch (err) {
+			if (!current()) return false;
 			log("轨道模式不可用，回落 DOM 模式：", err);
 		}
 
@@ -1673,6 +1700,7 @@
 		if (subtitleState.observer && subtitleState.container?.isConnected) return true;
 
 		const container = await waitForElement(CAPTION_CONTAINER, { timeout: 8000, root: player });
+		if (!current()) return false;
 		if (!container) {
 			log("字幕容器未出现（CC 字幕没开？），翻译引擎未启动");
 			return false;
@@ -1681,7 +1709,7 @@
 
 		// Rust 翻译完成 eval 回来只认最新的请求序号，旧结果直接丢弃。
 		window.__wetubeOnSubtitleTranslated = (id, ok, payload) => {
-			if (String(id) !== String(subtitleState.seq)) return;
+			if (!current() || String(id) !== subtitleRequestId("line", subtitleState.seq)) return;
 			renderTranslation(ok, payload);
 		};
 		// Ack 回执已在轨道引擎段统一注册（带条数），这里不再覆盖。
@@ -1722,6 +1750,9 @@
 
 	/** 停引擎：摘 observer/timeupdate、删译文层、恢复原生字幕。不动 state.on（由调用方管）。 */
 	function stopEngine() {
+		subtitleState.generation += 1;
+		subtitleState.controller?.abort();
+		subtitleState.controller = null;
 		clearTimeout(subtitleState.debounce);
 		clearTimeout(subtitleState.hintTimer);
 		subtitleState.observer?.disconnect();
@@ -1737,6 +1768,13 @@
 		subtitleState.lastSent = "";
 		subtitleState.lastSentAt = 0;
 		subtitleState.mode = null;
+		// 重启或切换视频时旧译文不可复用，旧请求的回包也必须失效。
+		subtitleState.cues = null;
+		subtitleState.cueVideoId = "";
+		subtitleState.cueTrackHash = "";
+		subtitleState.batchIndexById = {};
+		subtitleState.pendingBatches = 0;
+		subtitleState.translatedCount = 0;
 	}
 
 	/**

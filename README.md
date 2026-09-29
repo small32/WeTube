@@ -156,8 +156,28 @@ powershell -ExecutionPolicy Bypass -File scripts/fetch-bundled-tools-windows.ps1
 
 脚本会做这几件事：`cargo build --release` → 组装 `.app` 目录 → 用 `iconutil`
 把 `icons/AppIcon.iconset` 转成 `AppIcon.icns` → 生成 `Info.plist` → ad-hoc 签名。
+Intel 构建需要 PATH 中有 x86_64 或 Universal 版 ffmpeg 和 QuickJS-NG `qjs`。
+脚本会检查工具及其依赖库的架构，把非系统动态库递归复制到 `Resources/lib`，
+并重写为包内相对路径；依赖缺失时停止构建。
 图标来自 `Dakirby309-Simply-Styled-YouTube.ico`，通过 `scripts/make-icons.py` 一次性
 生成 ico 和 iconset。
+
+### 回归验证
+
+```bash
+cargo test --all-targets
+node scripts/verify-download-events.js
+node scripts/verify-state-lifecycle.js
+python3 scripts/test-bundle-macos-libs.py  # macOS：验证迁移后不依赖原库目录
+```
+
+整页初始化测试需要 jsdom。先导出当前 Rust 生成的脚本，再验证刷新、重置、
+任务恢复和登录页面标题栏：
+
+```bash
+WETUBE_BOOTSTRAP_FIXTURE=/tmp/wetube-bootstrap.js cargo test bootstrap_fixture
+node scripts/verify-bootstrap.js /tmp/wetube-bootstrap.js
+```
 
 ### 图标
 

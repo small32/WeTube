@@ -1,6 +1,6 @@
 [package]
 name = "WeTube"
-version = "3.0.0"
+version = "3.0.1"
 edition = "2024"
 description = "WeTube：一个同时支持 macOS 与 Windows 的 YouTube 桌面端App（内建 YouTube-Enhancer）"
 license = "GPL-3.0"

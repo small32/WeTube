@@ -208,7 +208,7 @@
   function syncFabVisibility() {
     const fab = document.getElementById("wetube-dl-fab");
     if (!fab) return;
-    const show = downloadEnabled() && isVideoPage();
+    const show = downloadEnabled() && (isVideoPage() || tasks.size > 0);
     fab.style.display = show ? "flex" : "none";
     // 离开视频页时顺手收起面板，避免下次进来残留旧状态
     if (!show) {
@@ -307,8 +307,10 @@
       const active = [...tasks.values()].filter((t) => t.state === "running" || t.state === "probing").length;
       badge.textContent = String(active);
       badge.style.display = active > 0 ? "flex" : "none";
+      syncFabVisibility();
     }
     window.__wetubeDlRefreshBadge = refreshBadge;
+    send({ type: "download:sync" });
 
     /* 打开面板时预填当前视频链接 */
     function togglePanel() {
@@ -424,9 +426,14 @@
     go.className = "t-go";
     go.textContent = "下载";
     go.addEventListener("click", () => {
+      if (task.state !== "ready") return;
       const [mode, formatId, audioFlag] = sel.value.split(":");
+      task.requestId = `${window.__WETUBE_PAGE_ID__}:${++seq}`;
+      task.state = "queued";
       send({
         type: "download:start",
+        requestId: task.requestId,
+        title: task.title,
         url: task.url,
         mode,
         formatId: formatId || "",
@@ -447,6 +454,10 @@
   window.__wetubeDownloadEvent = (event) => {
     if (!event || typeof event !== "object") return;
     switch (event.kind) {
+      case "snapshot": {
+        for (const saved of event.events || []) window.__wetubeDownloadEvent(saved);
+        break;
+      }
       case "probe-start": {
         const key = `probe:${++seq}`;
         const card = makeCard(key, "");
@@ -489,12 +500,15 @@
         break;
       }
       case "started": {
-        // 把最早一个 queued 任务绑定到真实 id
-        const entry3 = [...tasks.entries()].find(([, t]) => t.state === "queued");
-        if (entry3) {
-          const [key, t] = entry3;
-          tasks.delete(key);
+        if (tasks.has(`task:${event.id}`)) break;
+        const entry3 = [...tasks.entries()].find(([, t]) =>
+          t.state === "queued" && event.requestId && t.requestId === event.requestId);
+        {
+          const key = entry3?.[0] || `task:${event.id}`;
+          const t = entry3?.[1] || makeCard(key, event.title || event.url);
+          if (entry3) tasks.delete(key);
           t.id = event.id;
+          t.url = event.url;
           t.state = "running";
           t.cancel.style.display = "";
           t.cancel.onclick = () => send({ type: "download:cancel", id: event.id });
@@ -528,7 +542,7 @@
         break;
       }
       case "fail": {
-        const t = tasks.get(`task:${event.id}`) || (event.id === 0 ? [...tasks.entries()].find(([, t]) => t.state === "queued")?.[1] : null);
+        const t = tasks.get(`task:${event.id}`) || (event.id === 0 ? [...tasks.values()].find((t) => t.state === "queued" && t.requestId === event.requestId) : null);
         if (!t) break;
         // 终态守卫：仅忽略终态，允许覆盖 cancelled 中间状态
         if (t.state === "done" || t.state === "failed") break;
