@@ -311,6 +311,36 @@ fn no_console_window(cmd: &mut Command) {
     }
 }
 
+/// 逐行读子进程输出，**单行解码失败绝不能中断迭代**。
+///
+/// 不能写成 `reader.lines().map_while(Result::ok)`：`BufRead::lines()` 遇到非法 UTF-8
+/// 返回 `Err(InvalidData)`，而 `map_while` 在第一个 `Err` 处结束**整个迭代**；又因为
+/// `lines()` 按值消耗 reader，循环一结束 BufReader 就被 drop、管道读端随之关闭，
+/// 子进程下一次往里写就 EPIPE（Windows 上是 Errno 22），下载直接判失败。
+///
+/// 这不是理论风险：yt-dlp 输出编码跟随系统 locale，中文 Windows（cp936）下它写的是
+/// GBK，而 `[download] Destination: <中文路径>` 这条**下载开始前就会打印**的行带非法
+/// UTF-8 字节——进度条于是永远停在 0%，任务随后报一句看不懂的 OSError，重试必现。
+/// 默认下载目录就是 `%USERPROFILE%\Downloads\WeTube`，中文用户名即中招。
+///
+/// 改用 `read_until` 读原始字节（不做 UTF-8 校验，只有真正的 IO 错误才失败），
+/// 再 `from_utf8_lossy` 容错解码，保证管道一定被读到 EOF。
+fn lines_lossy<R: std::io::Read>(reader: R) -> impl Iterator<Item = String> {
+    let mut reader = BufReader::new(reader);
+    let mut buf: Vec<u8> = Vec::new();
+    std::iter::from_fn(move || {
+        buf.clear();
+        match reader.read_until(b'\n', &mut buf) {
+            Ok(0) => None, // EOF
+            Ok(_) => {
+                let text = String::from_utf8_lossy(&buf);
+                Some(text.trim_end_matches(|c| c == '\r' || c == '\n').to_string())
+            }
+            Err(_) => None, // 只有真正的 IO 错误才停
+        }
+    })
+}
+
 /// 每个任务共享一个句柄，包含进程和取消标记，供 cancel() 和 cleanup 线程共同访问。
 #[derive(Default)]
 struct TaskHandle {
@@ -552,11 +582,26 @@ fn with_deno(cmd: &mut Command, deno: &Option<std::path::PathBuf>) {
     }
 }
 
+/// 把 yt-dlp 的 stdout/stderr 固定成 UTF-8，不让它跟随系统 locale。
+///
+/// yt-dlp 是 PyInstaller 打包的 CPython 程序，stdio 编码默认取系统 locale：中文
+/// Windows（cp936）下它会写 GBK，路径行因此带非法 UTF-8 字节。设了这两个变量之后
+/// 它一律输出 UTF-8，路径行也能被正确解析（否则即便读取循环不中断，`from_utf8_lossy`
+/// 也会把中文路径解成一串 U+FFFD，最终路径只能指望 ASCII 转义的 `WTPATH|` 兜底）。
+///
+/// 这是治本的一层，但**不能替代** `lines_lossy`：那层保证「无论子进程吐什么字节，
+/// 管道都不会被提前关掉」。两层失效模式不重叠，必须都在。
+fn force_utf8_output(cmd: &mut Command) {
+    cmd.env("PYTHONIOENCODING", "utf-8");
+    cmd.env("PYTHONUTF8", "1");
+}
+
 /// 探测视频信息（阻塞，跑在后台线程）。成功时返回可直接发给页面的摘要 JSON。
 pub fn probe(url: &str, cookies: &CookieSource) -> Result<Value, String> {
     let ytdlp = yt_dlp_path().ok_or("未找到 yt-dlp（App 包损坏或未安装）")?;
     let mut cmd = Command::new(&ytdlp);
     no_console_window(&mut cmd);
+    force_utf8_output(&mut cmd);
     cmd.arg("-J").arg("--no-warnings");
     cookies.apply(&mut cmd);
     cmd.arg(url);
@@ -803,6 +848,7 @@ pub fn start(
 
     let mut cmd = Command::new(&ytdlp);
     no_console_window(&mut cmd);
+    force_utf8_output(&mut cmd);
     // --newline：进度事件一行一个（默认进度条会用 \r 刷屏，没法按行读）
     // 保留 .part 后缀：取消后重下可续传。
     // --restrict-filenames：避免奇怪字符在某些文件系统上出问题
@@ -889,9 +935,8 @@ pub fn start(
 
     // 读 stdout：进度行 + 最终文件路径行
     std::thread::spawn(move || {
-        let reader = BufReader::new(stdout);
         let mut final_path: Option<String> = None;
-        for line in reader.lines().map_while(Result::ok) {
+        for line in lines_lossy(stdout) {
             if let Some(event) = parse_progress_line(&line) {
                 on_event(id, event);
             } else if let Some(path) = parse_final_path(&line) {
@@ -988,7 +1033,9 @@ fn parse_final_path(line: &str) -> Option<String> {
 fn drain_stderr(reader: impl std::io::Read + Send + 'static) -> std::thread::JoinHandle<String> {
     std::thread::spawn(move || {
         let mut text = String::new();
-        for line in BufReader::new(reader).lines().map_while(Result::ok) {
+        // 这里同样必须用 lines_lossy：stderr 里常有中文路径，提前收工不但会截断
+        // friendly_error 要用的报错信息，还会把 stderr 管道也一并关掉。
+        for line in lines_lossy(reader) {
             text.push_str(&line);
             text.push('\n');
         }
@@ -1008,6 +1055,37 @@ mod tests {
         );
         assert_eq!(parse_final_path("[download] Destination: old.webm"), None);
         assert_eq!(parse_final_path("WTPATH|invalid"), None);
+    }
+
+    /// 回归：非法 UTF-8 的一行**不能**让读取迭代提前结束。
+    ///
+    /// 曾经写成 `reader.lines().map_while(Result::ok)`。中文 Windows 下 yt-dlp 用 GBK
+    /// 写出的 `[download] Destination: <中文路径>` 是下载开始前就打印的第一条含路径的
+    /// 行，于是第一次读取就返回 Err、**循环体一次都不会执行**（进度事件一个都发不出去）；
+    /// 又因 `lines()` 按值消耗 reader，BufReader 随之被 drop、管道读端关闭，yt-dlp 下一次
+    /// 写进度就 Errno 22 失败——用户看到的是「进度永远 0% 然后失败」。
+    /// 这个测试钉住「坏行之后必须继续读」。
+    #[test]
+    fn lines_lossy_keeps_draining_after_invalid_utf8() {
+        // \xb2\xe2\xca\xd4 是 "测试" 的 GBK 字节：yt-dlp 在 cp936 下正是这么写路径的
+        let mut input: Vec<u8> = Vec::new();
+        input.extend_from_slice(b"[download] Destination: C:\\");
+        input.extend_from_slice(&[0xb2, 0xe2, 0xca, 0xd4]);
+        input.extend_from_slice(b"\\a.mp4\n");
+        // 顺带覆盖 CRLF 剥离（Windows 上子进程可能吐 \r\n）
+        input.extend_from_slice(b"WTDL|10.0%|1.0MiB/s|00:10|1048576|10485760\r\n");
+        input.extend_from_slice(b"WTPATH|\"C:\\\\u6d4b\\\\a.mp4\"\n");
+        // 结尾没有换行的残行也要交出来
+        input.extend_from_slice(b"tail-without-newline");
+
+        let lines: Vec<String> = lines_lossy(input.as_slice()).collect();
+        assert_eq!(lines.len(), 4, "非法 UTF-8 那行之后必须继续读：{lines:?}");
+        assert!(lines[0].starts_with("[download] Destination: "));
+        // 坏字节被替换成 U+FFFD，但行本身保留了
+        assert!(lines[0].contains('\u{fffd}'));
+        assert_eq!(lines[1], "WTDL|10.0%|1.0MiB/s|00:10|1048576|10485760");
+        assert_eq!(lines[2], "WTPATH|\"C:\\\\u6d4b\\\\a.mp4\"");
+        assert_eq!(lines[3], "tail-without-newline");
     }
 
     #[test]
