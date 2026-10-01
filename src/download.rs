@@ -582,18 +582,20 @@ fn with_deno(cmd: &mut Command, deno: &Option<std::path::PathBuf>) {
     }
 }
 
-/// 把 yt-dlp 的 stdout/stderr 固定成 UTF-8，不让它跟随系统 locale。
+/// 让 yt-dlp 的输出固定成 UTF-8，而不是跟随系统 locale。
 ///
-/// yt-dlp 是 PyInstaller 打包的 CPython 程序，stdio 编码默认取系统 locale：中文
-/// Windows（cp936）下它会写 GBK，路径行因此带非法 UTF-8 字节。设了这两个变量之后
-/// 它一律输出 UTF-8，路径行也能被正确解析（否则即便读取循环不中断，`from_utf8_lossy`
-/// 也会把中文路径解成一串 U+FFFD，最终路径只能指望 ASCII 转义的 `WTPATH|` 兜底）。
+/// **必须用 yt-dlp 自己的 `--encoding`，不能用 `PYTHONIOENCODING` 环境变量。**
+/// yt-dlp 是 PyInstaller 打包的 CPython 程序，打包后的它不认这个变量——实测同一个
+/// 中文 Windows 上，普通 `python.exe` 设了 `PYTHONIOENCODING=utf-8` 后
+/// `sys.stdout.encoding` 会从 gbk 变成 utf-8，但打成 exe 的 yt-dlp 无论设不设都仍报
+/// `[debug] Encodings: ... out gbk`；换成 `--encoding utf-8` 之后，它写出的中文字节
+/// 才真的从 GBK 变成 UTF-8（实测 `测试中文ABC`：GBK `\xb2\xe2...` → UTF-8 `\xe6\xb5\x8b...`）。
 ///
-/// 这是治本的一层，但**不能替代** `lines_lossy`：那层保证「无论子进程吐什么字节，
-/// 管道都不会被提前关掉」。两层失效模式不重叠，必须都在。
-fn force_utf8_output(cmd: &mut Command) {
-    cmd.env("PYTHONIOENCODING", "utf-8");
-    cmd.env("PYTHONUTF8", "1");
+/// 这一层是为了让 `[download] Destination:` / `[Merger]` 这些含中文路径的行能被正确
+/// 解码，但它**不能替代** `lines_lossy`：那层保证「无论子进程吐什么字节，管道都不会
+/// 被提前关掉」。两层的失效模式不重叠，必须都在。
+fn with_utf8_output(cmd: &mut Command) {
+    cmd.arg("--encoding").arg("utf-8");
 }
 
 /// 探测视频信息（阻塞，跑在后台线程）。成功时返回可直接发给页面的摘要 JSON。
@@ -601,7 +603,7 @@ pub fn probe(url: &str, cookies: &CookieSource) -> Result<Value, String> {
     let ytdlp = yt_dlp_path().ok_or("未找到 yt-dlp（App 包损坏或未安装）")?;
     let mut cmd = Command::new(&ytdlp);
     no_console_window(&mut cmd);
-    force_utf8_output(&mut cmd);
+    with_utf8_output(&mut cmd);
     cmd.arg("-J").arg("--no-warnings");
     cookies.apply(&mut cmd);
     cmd.arg(url);
@@ -848,7 +850,7 @@ pub fn start(
 
     let mut cmd = Command::new(&ytdlp);
     no_console_window(&mut cmd);
-    force_utf8_output(&mut cmd);
+    with_utf8_output(&mut cmd);
     // --newline：进度事件一行一个（默认进度条会用 \r 刷屏，没法按行读）
     // 保留 .part 后缀：取消后重下可续传。
     // --restrict-filenames：避免奇怪字符在某些文件系统上出问题
@@ -1086,6 +1088,19 @@ mod tests {
         assert_eq!(lines[1], "WTDL|10.0%|1.0MiB/s|00:10|1048576|10485760");
         assert_eq!(lines[2], "WTPATH|\"C:\\\\u6d4b\\\\a.mp4\"");
         assert_eq!(lines[3], "tail-without-newline");
+    }
+
+    /// 钉住「输出编码靠 yt-dlp 的 --encoding，而不是 PYTHONIOENCODING 环境变量」。
+    ///
+    /// 打包成 exe 的 yt-dlp 不认那个环境变量（实测设了仍写 GBK），所以这里断言它
+    /// 真的出现在命令行参数里——若有人图省事改回 `.env(...)`，这条会失败。
+    #[test]
+    fn utf8_output_uses_cli_flag_not_env_var() {
+        let mut cmd = Command::new("yt-dlp");
+        with_utf8_output(&mut cmd);
+        let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert_eq!(args, vec!["--encoding", "utf-8"]);
+        assert!(cmd.get_envs().next().is_none(), "不应依赖环境变量");
     }
 
     #[test]
