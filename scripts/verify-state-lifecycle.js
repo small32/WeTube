@@ -3,7 +3,11 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const assert = require('node:assert/strict');
-const read = (name) => fs.readFileSync(path.join(__dirname, '../src', name), 'utf8');
+// 统一成 LF 再比对：Windows 上 core.autocrlf=true 时检出的是 CRLF，
+// 而下面 extract() 用的标记是带 \n 的字面量，CRLF 会让它匹配不上，
+// 表现为 AssertionError（marker 找不到），而不是测试真的失败。
+const read = (name) =>
+  fs.readFileSync(path.join(__dirname, '../src', name), 'utf8').replace(/\r\n/g, '\n');
 
 async function main() {
   const flush = () => new Promise((resolve) => setTimeout(resolve, 0));

@@ -522,12 +522,24 @@
 				sizeButton()?.click();
 				return inTheaterMode();
 			}, { attempts: 20, interval: 300, timeout: 8000 }),
-		disable: () =>
-			void retry(() => {
-				if (!inTheaterMode()) return true;
-				sizeButton()?.click();
-				return !inTheaterMode();
-			}, { attempts: 20, interval: 300, timeout: 8000 }),
+		// 这里必须什么都不做，不能在停用时退出影院模式。
+		//
+		// runtime 在每次导航事件（yt-navigate-start / yt-navigate-finish /
+		// yt-page-data-updated / popstate）后都会 syncAll({force:true})，对已启用的
+		// 功能走「先 disable 再 enable」的重建路径；而进入 watch 页时这几个事件会
+		// 连着触发好几次。又因为 enable/disable 都是不返回 Promise 的 `void retry(...)`，
+		// runtime 那句 `await disable()` 立刻返回，两个重试循环会并发跑；而 YouTube
+		// 切影院模式是异步生效的（点完按钮，DOM 上的 theater 属性要过一拍才变）。
+		// 于是：disable 点了「退出」→ enable 看到属性还没变、误判「已经开着」直接
+		// 返回 → 上一步的点击随后生效，影院模式被关掉。更糟的是两个循环会以
+		// interval 为周期互相翻转，影院模式反复抖动，直到重试超时。
+		//
+		// 这个功能的语义是「打开视频自动切到影院模式」，关掉开关只该停止自动进入，
+		// 不该去改动用户当前的布局。同为「自动切换 YouTube 自身状态」的
+		// automaticallyDisableClosedCaptions / automaticallyDisableAmbientMode
+		// 也都是空 disable，这里与它们保持一致。
+		// 回归测试：scripts/verify-theater-mode.js
+		disable: () => {},
 	};
 
 	// 自动最大化播放器

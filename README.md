@@ -168,6 +168,7 @@ Intel 构建需要 PATH 中有 x86_64 或 Universal 版 ffmpeg 和 QuickJS-NG `q
 cargo test --all-targets
 node scripts/verify-download-events.js
 node scripts/verify-state-lifecycle.js
+node scripts/verify-theater-mode.js
 python3 scripts/test-bundle-macos-libs.py  # macOS：验证迁移后不依赖原库目录
 ```
 
