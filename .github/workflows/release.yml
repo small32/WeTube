@@ -1,0 +1,232 @@
+name: Release
+
+# 打 v* tag 自动构建并发布；也可以在 Actions 页面手动指定 tag 触发
+# （留空 = 仓库里最新的 tag），用来给已存在的 Release 补产物。
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要构建并发布的 tag（留空 = 最新 tag）'
+        required: false
+        type: string
+
+# gh release create/upload 需要写权限。
+permissions:
+  contents: write
+
+concurrency:
+  group: "release-${{ github.event.inputs.tag || github.ref_name }}"
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  # 构建脚本默认会自动追 yt-dlp 最新 stable 并改写自身的 pin 后重入构建。
+  # Release 要可复现，这里关掉，只用脚本里 pin 死的版本（哈希校验照旧生效）。
+  YTDLP_AUTO_UPDATE: '0'
+
+jobs:
+  prepare:
+    name: 解析版本
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      version: ${{ steps.resolve.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: 解析 tag 与版本号
+        id: resolve
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_EVENT_NAME" = "push" ]; then
+            TAG="$GITHUB_REF_NAME"
+          elif [ -n "${INPUT_TAG:-}" ]; then
+            TAG="$INPUT_TAG"
+          else
+            TAG="$(git describe --tags --abbrev=0)"
+          fi
+          # 确认 tag 真的存在（gh release create --verify-tag 也依赖这点）。
+          git rev-parse --verify "refs/tags/${TAG}^{commit}" >/dev/null
+          # 版本号唯一来源是 Cargo.toml 的 [package].version，与 build-macos-app.sh 一致。
+          # 注意：这里不能用 `| head -1` 截断——pipefail 下上游会吃到 SIGPIPE 而让整步失败。
+          # 让 sed 自己跑完，再用参数展开取第一行。
+          VERSION="$(git show "$TAG:Cargo.toml" | sed -n 's/^version *= *"\(.*\)"/\1/p')"
+          VERSION="${VERSION%%$'\n'*}"
+          [ -n "$VERSION" ] || { echo "无法从 $TAG 的 Cargo.toml 解析版本号"; exit 1; }
+          if [ "$GITHUB_EVENT_NAME" = "push" ] && [ "$TAG" != "v$VERSION" ]; then
+            echo "::warning::tag $TAG 与 Cargo.toml 版本 $VERSION 不一致"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "解析结果：tag=$TAG  version=$VERSION"
+
+  windows:
+    name: Windows x64
+    needs: prepare
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+          # vendor/*.xz 是 Git LFS 托管的内嵌工具载荷，必须真正拉下来，
+          # 否则 include_bytes! 会把 134 字节的 LFS 指针文件打进 exe。
+          lfs: true
+
+      - name: 校验 LFS 内嵌工具已展开
+        shell: pwsh
+        run: |
+          $expect = @{
+            'vendor/ffmpeg.exe.xz' = 1MB
+            'vendor/yt-dlp.exe.xz' = 1MB
+            'vendor/qjs.exe.xz'    = 100KB
+          }
+          foreach ($f in $expect.Keys) {
+            if (-not (Test-Path $f)) { throw "缺少 $f" }
+            $len = (Get-Item $f).Length
+            if ($len -lt $expect[$f]) { throw "$f 只有 $len 字节，疑似 Git LFS 指针未展开" }
+            Write-Host ("{0}  {1:N0} 字节" -f $f, $len)
+          }
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: '. -> target'
+
+      - name: 构建
+        run: cargo build --release
+
+      - name: 打包
+        shell: pwsh
+        run: |
+          $exe = 'target/release/WeTube.exe'
+          if (-not (Test-Path $exe)) { throw "未生成 $exe" }
+          $len = (Get-Item $exe).Length
+          Write-Host ("WeTube.exe  {0:N0} 字节" -f $len)
+          # 内嵌 ffmpeg/yt-dlp/qjs 的 xz 载荷约 40MB，明显偏小说明没内嵌进去。
+          if ($len -lt 20MB) { throw "WeTube.exe 只有 $len 字节，内嵌工具可能未打进包" }
+          Compress-Archive -Path $exe `
+            -DestinationPath "WeTube-${{ needs.prepare.outputs.version }}-windows-x64.zip" `
+            -CompressionLevel Optimal
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows-x64
+          path: WeTube-*-windows-x64.zip
+          if-no-files-found: error
+          # 产物内部已是压缩态，再压一遍纯属浪费。
+          compression-level: 0
+
+  macos:
+    name: macOS ${{ matrix.label }}
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            label: arm64
+            asset: macos-arm64
+          # macos-13 已被 GitHub 退役，Intel runner 现在是 macos-15-intel。
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            label: x64
+            asset: macos-x64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: '. -> target'
+          key: ${{ matrix.label }}
+
+      # build-macos-app.sh 对 arm64 会自己下载 pin 死哈希的 ffmpeg/qjs；
+      # 但 Intel 分支要求 PATH 里已有 x86_64 的 ffmpeg 与 qjs，这里备好。
+      # 两个哈希都是首次取件时算出来 pin 在这里的（与脚本里 FFMPEG_SHA256 /
+      # QJS_SHA256 同样的做法），改动必须同步更新。
+      - name: 准备 Intel(x86_64) 外置工具
+        if: matrix.target == 'x86_64-apple-darwin'
+        run: |
+          set -euo pipefail
+          TOOLS="$RUNNER_TEMP/wetube-tools"
+          mkdir -p "$TOOLS"
+          # ffmpeg：osxexperts 的 Intel 静态构建（与 arm 版同源，无外部 dylib 依赖）。
+          curl -fL --retry 3 -o "$RUNNER_TEMP/ffmpeg80intel.zip" \
+            "https://www.osxexperts.net/ffmpeg80intel.zip"
+          echo "2d24d22db78c87f394a5822867acd5c5dc5e762cd261a44bd26923f3a5af3e07  $RUNNER_TEMP/ffmpeg80intel.zip" \
+            | shasum -a 256 -c -
+          unzip -o -j -q "$RUNNER_TEMP/ffmpeg80intel.zip" ffmpeg -d "$TOOLS"
+          # qjs：QuickJS-NG，与构建脚本 pin 的 0.16.2 同版本。
+          curl -fL --retry 3 -o "$TOOLS/qjs" \
+            "https://github.com/quickjs-ng/quickjs/releases/download/v0.16.2/qjs-darwin-x86_64"
+          echo "4448991c0500dbe40c7b2f91ba39275995413aa4ee59db3b513b68350908a413  $TOOLS/qjs" \
+            | shasum -a 256 -c -
+          chmod +x "$TOOLS/ffmpeg" "$TOOLS/qjs"
+          lipo -archs "$TOOLS/ffmpeg" "$TOOLS/qjs"
+          echo "$TOOLS" >> "$GITHUB_PATH"
+
+      - name: 构建 .app
+        run: |
+          set -euo pipefail
+          rustup target add "${{ matrix.target }}"
+          ./scripts/build-macos-app.sh "${{ matrix.target }}"
+
+      - name: 打包
+        run: |
+          set -euo pipefail
+          APP="target/${{ matrix.target }}/release/WeTube.app"
+          test -d "$APP" || { echo "未生成 $APP"; exit 1; }
+          echo "--- 签名信息 ---"
+          codesign -dv "$APP" 2>&1 || true
+          echo "--- 内嵌工具 ---"
+          ls -l "$APP/Contents/Resources/bin" || true
+          # 用 ditto 保留 .app 的目录结构与权限位，zip 解开即可直接运行。
+          ditto -c -k --keepParent "$APP" \
+            "WeTube-${{ needs.prepare.outputs.version }}-${{ matrix.asset }}.zip"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.asset }}
+          path: WeTube-*-${{ matrix.asset }}.zip
+          if-no-files-found: error
+          compression-level: 0
+
+  publish:
+    name: 发布 Release
+    needs: [prepare, windows, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: 上传到 Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          ls -lh dist
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG 已存在，补充/覆盖资产"
+            gh release upload "$TAG" dist/* --clobber
+          else
+            echo "创建 Release $TAG"
+            gh release create "$TAG" dist/* --verify-tag \
+              --title "WeTube $VERSION" --generate-notes
+          fi
+          echo "--- 当前 Release 资产 ---"
+          gh release view "$TAG" --json tagName,assets \
+            --jq '.tagName, (.assets[] | "  " + .name + "  " + (.size|tostring) + " bytes")'
