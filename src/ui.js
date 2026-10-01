@@ -68,10 +68,14 @@
     applyShift(isYouTube());
   }
 
+  // chrome（工具栏/菜单/窗口控制）当前是否可见。全屏时它被隐藏，页面下推也必须跟着撤销——
+  // 否则导航事件里那句 applyShift 会把 36px 空白重新加回来（见下面的 yt-navigate-finish）。
+  let chromeVisible = true;
+
   function applyShift(on) {
     const root = document.documentElement;
     if (!root) return;
-    root.classList.toggle("wetube-support-shift", HAS_CHROME && on);
+    root.classList.toggle("wetube-support-shift", HAS_CHROME && on && chromeVisible);
   }
 
   /* 最大化/宽屏时使用 YouTube 完整侧栏，普通窗口保留 mini guide。
@@ -218,6 +222,11 @@
       // 但全屏是开关——连发会把它来回翻转，窗口就"进去又弹出来"。
       if (!id || ev.repeat) return;
       ev.preventDefault();
+      // 拦住它，别让同一个按键再被别的捕获监听当成第二次。panel.js 为 Cmd/Ctrl+, 留了一条
+      // 硬编码监听（document 捕获阶段），而 window 捕获先于 document 捕获——不拦的话这次
+      // 按键会被 toggle 两次，净效果是「按了没反应」。stopPropagation 不影响同一 target 上
+      // 的其它监听，所以快捷键设置面板（同样挂在 window 捕获）照常工作。
+      ev.stopPropagation();
       send(id);
     },
     true
@@ -245,6 +254,7 @@
     if (!HAS_CHROME) return;
     const bar = document.getElementById("wetube-chrome");
     if (!bar) return;
+    chromeVisible = visible;
     const hidden = bar.style.display === "none";
     const wantHidden = !visible;
     if (hidden === wantHidden) return;

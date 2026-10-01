@@ -3,7 +3,7 @@
 WeTube 是一个用 Rust 写的 YouTube 桌面端App：一个装 youtube.com 的 `WKWebView` /
 `WebView2`，加后退 / 前进 / 刷新三个按钮（以及更多），同时支持 macOS 和 Windows，
 并把 [YouTube-Enhancer](https://github.com/YouTube-Enhancer/extension)
-扩展的功能直接内建进了程序——不是让你去装扩展，是程序自带。目前内置 **42 个功能、81 个可调节项**。
+扩展的功能直接内建进了程序——不是让你去装扩展，是程序自带。目前内置 **42 个功能、83 项设置**（含每个功能自己的「启用」开关，其余 41 项是可调参数）。
 
 | 平台   | 网页内核                    | 说明                                   |
 | ------ | --------------------------- | -------------------------------------- |
@@ -28,7 +28,7 @@ WeTube 是一个用 Rust 写的 YouTube 桌面端App：一个装 youtube.com 的
 
 点工具栏最右边的齿轮（或按 `Cmd/Ctrl + ,`）打开设置面板：
 
-- **81 个可调节项全部自动生成**，加一项只需要改 `src/enhancer/schema.json` 一处
+- **83 项设置全部自动生成**，加一项只需要改 `src/enhancer/schema.json` 一处
 - 按内容过滤 / 播放器 / 按钮 / Shorts / 播放列表 / 外观 / 高级分成 7 组，支持搜索
 - 改动即时生效，自动存盘
 
@@ -164,21 +164,34 @@ Intel 构建需要 PATH 中有 x86_64 或 Universal 版 ffmpeg 和 QuickJS-NG `q
 
 ### 回归验证
 
+不需要 DOM 的那几条（零依赖，直接跑）：
+
 ```bash
 cargo test --all-targets
 node scripts/verify-download-events.js
 node scripts/verify-state-lifecycle.js
 node scripts/verify-theater-mode.js
+node scripts/verify-captions-mode.js
+node scripts/verify-player-quality.js
 python3 scripts/test-bundle-macos-libs.py  # macOS：验证迁移后不依赖原库目录
 ```
 
-整页初始化测试需要 jsdom。先导出当前 Rust 生成的脚本，再验证刷新、重置、
-任务恢复和登录页面标题栏：
+整页注入脚本（标题栏 / 工具栏 / 设置面板 / 下载面板）的测试需要 DOM，靠 jsdom 提供：
 
 ```bash
-WETUBE_BOOTSTRAP_FIXTURE=/tmp/wetube-bootstrap.js cargo test bootstrap_fixture
-node scripts/verify-bootstrap.js /tmp/wetube-bootstrap.js
+npm install          # 只装 jsdom，见 package.json
+npm run verify       # 一次跑完下面全部
+# 或单独跑：
+node scripts/verify-fullscreen.js          # 全屏联动
+node scripts/verify-platform-ui.js         # 三平台 chrome 差异 + 全屏下推 / 后退按钮刷新
+node scripts/verify-shortcuts.js           # 快捷键面板 + Ctrl+, 只切换一次
+node scripts/verify-download-panel.js      # 悬浮球显隐 + URL 预填跟随切视频
+node scripts/verify-panel-input.js         # 数字输入框的空值/越界校验
 ```
+
+> `verify-bootstrap.js` 需要先导出 Rust 生成的脚本，属单独一条：先跑
+> `WETUBE_BOOTSTRAP_FIXTURE=/tmp/wetube-bootstrap.js cargo test bootstrap_fixture`
+> 再 `node scripts/verify-bootstrap.js /tmp/wetube-bootstrap.js`。
 
 ### 图标
 

@@ -481,24 +481,6 @@
       ]
     },
     {
-      "id": "automaticallyMaximizePlayer",
-      "label": "自动最大化播放器",
-      "desc": "打开视频自动把播放器最大化填满页面",
-      "group": "player",
-      "pages": [
-        "watch",
-        "live"
-      ],
-      "fields": [
-        {
-          "key": "enabled",
-          "type": "boolean",
-          "default": false,
-          "label": "启用"
-        }
-      ]
-    },
-    {
       "id": "automaticallyDisableClosedCaptions",
       "label": "自动关闭字幕",
       "desc": "打开视频自动关掉字幕",
@@ -870,25 +852,6 @@
             "lower",
             "higher"
           ]
-        },
-        {
-          "key": "fpsPreference",
-          "type": "select",
-          "default": "default",
-          "label": "帧率偏好",
-          "parent": "enabled",
-          "options": [
-            "default",
-            "higher",
-            "lower"
-          ]
-        },
-        {
-          "key": "preferPremium",
-          "type": "boolean",
-          "default": false,
-          "label": "优先 Premium 高码率",
-          "parent": "enabled"
         }
       ]
     },

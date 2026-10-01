@@ -20,3 +20,6 @@
 *.swp
 *.swo
 Thumbs.db
+
+# npm 依赖：只给 scripts/verify-*.js 用（见 package.json）
+/node_modules

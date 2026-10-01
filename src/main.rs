@@ -58,6 +58,14 @@ fn is_login_uri(uri: &Uri) -> bool {
         && uri.host() == Some("accounts.google.com")
 }
 
+/// 只有 http(s) 才交给系统处理器。
+///
+/// `window.open` / `target="_blank"` 不经过 `with_navigation_handler`，这里是唯一关口；
+/// 不设白名单的话，页面能借自定义协议或 `file:` 拉起本机程序（导航那边是有白名单的）。
+fn is_openable_external(url: &str) -> bool {
+    url.starts_with("https://") || url.starts_with("http://")
+}
+
 fn is_allowed_ipc(uri: &Uri, message: &str) -> bool {
     if is_trusted_ipc_uri(uri) { return true; }
     if !is_login_uri(uri) { return false; }
@@ -105,6 +113,26 @@ mod ipc_origin_tests {
             "https://evil.example/",
         ] {
             assert!(!is_trusted_ipc_uri(&denied.parse().unwrap()), "{denied}");
+        }
+    }
+
+    /// window.open / target="_blank" 只放行 http(s) 交给系统处理器。
+    /// 这条与 navigation_handler、is_allowed_ipc 是同一道防线，缺一个等于留后门。
+    #[test]
+    fn only_http_schemes_are_handed_to_the_system() {
+        for allowed in ["https://www.youtube.com/", "http://example.com/a?b=1"] {
+            assert!(is_openable_external(allowed), "{allowed}");
+        }
+        for denied in [
+            "file:///C:/Windows/System32/calc.exe",
+            "ms-settings:",
+            "vscode://foo/bar",
+            "javascript:alert(1)",
+            "data:text/html,<script>1</script>",
+            "ftp://example.com/",
+            "",
+        ] {
+            assert!(!is_openable_external(denied), "{denied}");
         }
     }
 }
@@ -313,8 +341,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         })
         // target="_blank" / window.open 一律交给系统浏览器，别把壳子整个带走。
         .with_new_window_req_handler(|url: String, _features| {
-            if let Err(err) = open::that(&url) {
-                log_err(&format!("打开外部链接失败: {err}"));
+            // 这里必须和上面的 navigation_handler 一样只放行 http(s)：window.open 不经过
+            // navigation_handler，这是唯一关口，否则页面能借自定义协议 / file: 拉起本机程序。
+            if is_openable_external(&url) {
+                if let Err(err) = open::that(&url) {
+                    log_err(&format!("打开外部链接失败: {err}"));
+                }
+            } else {
+                log_err(&format!("拒绝把非 http(s) 链接交给系统处理: {url}"));
             }
             NewWindowResponse::Deny
         })

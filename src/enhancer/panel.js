@@ -190,7 +190,23 @@
 			if (field.min !== undefined) input.min = field.min;
 			if (field.max !== undefined) input.max = field.max;
 			if (field.step !== undefined) input.step = field.step;
-			input.addEventListener("change", () => onChange(field.key, Number(input.value)));
+			// 必须自己校验：`Number("") === 0`，清空输入框（很常见的"想重输"操作）会把设置
+			// 静默写成 0，而 0 往往低于 min——例如滚轮调倍速的 steps 变成 0 后
+			// `Math.round(x / 0) * 0` 得到 NaN，给 video.playbackRate 赋值会抛 TypeError。
+			// min/max 只是 HTML 属性，不点表单的提交按钮不会自动裁剪。
+			input.addEventListener("change", () => {
+				const raw = input.value.trim();
+				const next = Number(raw);
+				if (!raw || !Number.isFinite(next)) {
+					input.value = String(cfg(feature.id, field.key) ?? 0); // 回填当前值，不写库
+					return;
+				}
+				const lo = field.min !== undefined ? Number(field.min) : -Infinity;
+				const hi = field.max !== undefined ? Number(field.max) : Infinity;
+				const clamped = Math.min(Math.max(next, lo), hi);
+				input.value = String(clamped);
+				if (clamped !== cfg(feature.id, field.key)) onChange(field.key, clamped);
+			});
 		} else if (field.type === "select") {
 			input = el("select", {}, (field.options ?? []).map((option) => el("option", { value: option, text: option, selected: option === value ? "selected" : null })));
 			input.addEventListener("change", () => onChange(field.key, input.value));

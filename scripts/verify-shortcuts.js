@@ -199,6 +199,54 @@ const check = (name, ok, detail) => checks.push([name, ok, detail]);
     `前 ${before[2]} → 后 ${after[2]}`);
 }
 
+// 8. Ctrl/Cmd+, 只能把设置面板切换一次
+//    ui.js 在 window 捕获阶段发出 IPC，Rust 收到后回调 __YTE.togglePanel()；
+//    而 panel.js 自己又在 document 捕获阶段硬编码了一条同样的 Cmd/Ctrl+, 监听。
+//    window 捕获先于 document 捕获 —— 不拦住的话同一次按键会 toggle 两次
+//    （panel.js 先开、IPC 回环再关），用户看到的就是「按了没反应」。
+{
+  const dom = new JSDOM(
+    `<!doctype html><html><head></head><body></body></html>`,
+    { url: "https://www.youtube.com/", runScripts: "outside-only", pretendToBeVisual: true }
+  );
+  const { window } = dom;
+  const sent = [];
+  window.__WETUBE_PLATFORM__ = "windows";
+  window.__WETUBE_SHORTCUTS__ = JSON.parse(JSON.stringify(REGISTRY));
+  window.ipc = { postMessage: (msg) => sent.push(msg) };
+  window.__YTE = {
+    schema: JSON.parse(fs.readFileSync(path.join(SRC, "enhancer", "schema.json"), "utf8")),
+    features: {},
+    cfg: () => undefined,
+    setConfig() {},
+    isEnabled: () => false,
+    log() {},
+  };
+
+  window.eval(fs.readFileSync(path.join(SRC, "ui.js"), "utf8"));
+  window.eval(fs.readFileSync(path.join(SRC, "enhancer", "panel.js"), "utf8"));
+
+  const isOpen = () => {
+    const root = window.document.getElementById("yte-settings-panel");
+    return !!root && root.style.display !== "none";
+  };
+
+  // 派发在 body 上，传播路径才是 window → document → body，两处捕获监听都会跑到
+  window.document.body.dispatchEvent(new window.KeyboardEvent("keydown", {
+    code: "Comma", key: ",", ctrlKey: true, bubbles: true, cancelable: true,
+  }));
+
+  // ui.js 的 send() 发的是裸命令字符串（不是 JSON），与 main.rs 的 act() 对应
+  const settingsMsgs = sent.filter((s) => s === "settings");
+  check("Ctrl+, 发出且只发出一条 settings", settingsMsgs.length === 1, `实际收到 ${JSON.stringify(sent)}`);
+
+  // 模拟 Rust 的 act("settings")：eval("window.__YTE.togglePanel()")
+  for (const _ of settingsMsgs) window.__YTE.togglePanel();
+
+  check("走完 IPC 回环后面板是打开的（说明只切换了一次）", isOpen() === true,
+    `isOpen=${isOpen()}；若被切了两次这里会是关的`);
+}
+
 // ---------------------------------------------------------------- 输出
 
 let failed = 0;

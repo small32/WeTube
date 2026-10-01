@@ -159,7 +159,12 @@ pub fn is_valid(spec: &str) -> bool {
 /// 实际生效的快捷键：有自定义用自定义，没有（或存的值坏了）退回默认。
 pub fn resolve(id: &str, custom: Option<&str>) -> Option<Accelerator> {
     let d = def(id)?;
-    custom.and_then(parse).or_else(|| parse(d.default))
+    // is_valid 也要过：settings.json 是能手改的，只 parse 的话一个裸键（"R"）会变成
+    // 菜单加速键，绕过"裸字母不许当快捷键"那道防线。
+    custom
+        .filter(|spec| is_valid(spec))
+        .and_then(parse)
+        .or_else(|| parse(d.default))
 }
 
 /// 面板上显示用：macOS 用符号，Windows / Linux 用文字。
@@ -246,14 +251,23 @@ pub fn registry_json(custom: &Map<String, Value>) -> String {
     let items: Vec<Value> = SHORTCUTS
         .iter()
         .map(|d| {
-            let stored = custom.get(d.id).and_then(Value::as_str);
-            let spec = stored.unwrap_or(d.default);
+            // 发出去的一律是**规范写法**。前端拿 spec 当 keymap 的键，而按键侧算出来的是
+            // `Mod+KeyR` 这种长写法——两边对不上时页面内快捷键会静默失效（只有菜单还能用）。
+            // 手写配置里的短写法（Mod+R）与非法值都在这里收敛掉，坏值退回默认。
+            let stored = custom
+                .get(d.id)
+                .and_then(Value::as_str)
+                .filter(|spec| is_valid(spec));
+            let spec = stored
+                .and_then(normalize)
+                .unwrap_or_else(|| d.default.to_string());
+            let shown = display(&spec);
             serde_json::json!({
                 "id": d.id,
                 "label": d.label,
                 "group": d.group,
                 "spec": spec,
-                "display": display(spec),
+                "display": shown,
                 "default": d.default,
                 "custom": stored.is_some(),
             })
@@ -419,5 +433,38 @@ mod tests {
             1,
             "应该只有一项是 custom"
         );
+    }
+
+    /// 手写 settings.json 里的短写法必须在发出去之前收敛成规范写法。
+    ///
+    /// 前端拿 spec 当 keymap 的键，而按键侧算出来的是 `Mod+KeyR`：原样发 `Mod+R`
+    /// 会让页面内快捷键静默失效（菜单还能用，所以很难发现）。
+    #[test]
+    fn registry_json_normalizes_handwritten_short_forms() {
+        let mut custom = Map::new();
+        custom.insert("reload".to_string(), Value::String("Mod+R".into()));
+        let items: Vec<Value> = serde_json::from_str(&registry_json(&custom)).unwrap();
+        let reload = items.iter().find(|it| it["id"] == "reload").unwrap();
+        assert_eq!(reload["spec"], "Mod+KeyR", "短写法要归一化成长写法");
+        assert_eq!(reload["custom"], true);
+        // display 也要跟着规范值算，别一个用短一个用长
+        assert_eq!(reload["display"], display("Mod+KeyR"));
+    }
+
+    /// 非法值（这里是不带修饰键的裸键）不能让页面内按键失效，也不能污染菜单加速键。
+    #[test]
+    fn bare_key_is_rejected_and_falls_back_to_default() {
+        let mut custom = Map::new();
+        custom.insert("reload".to_string(), Value::String("KeyR".into()));
+        let items: Vec<Value> = serde_json::from_str(&registry_json(&custom)).unwrap();
+        let reload = items.iter().find(|it| it["id"] == "reload").unwrap();
+        assert_eq!(reload["spec"], "Mod+KeyR", "坏值应退回默认");
+        assert_eq!(reload["custom"], false, "坏值不算自定义");
+
+        // resolve 同样要挡住：否则这个裸键会变成菜单加速键，绕开"裸字母不许当快捷键"的防线
+        assert!(is_valid("KeyR") == false);
+        let resolved = resolve("reload", Some("KeyR")).expect("应退回默认而不是裸键");
+        assert_eq!(encode(&resolved), "Mod+KeyR");
+        assert_eq!(resolve("reload", Some("Mod+K")).map(|a| encode(&a)).as_deref(), Some("Mod+KeyK"));
     }
 }

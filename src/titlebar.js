@@ -519,6 +519,11 @@
       refreshNav();
     }
     window.addEventListener("popstate", refreshNav);
+    // YouTube 的 SPA 导航走 history.pushState，**不触发 popstate**：只在挂载时算一次的话，
+    // history.length 增长后这两个按钮的 disabled 永远不刷新。而 disabled 的按钮连 click
+    // 都不派发，goBack() 根本没机会执行——表现为后退按钮一直灰显、点了没反应。
+    window.addEventListener("yt-navigate-finish", refreshNav);
+    window.addEventListener("yt-page-data-updated", refreshNav);
     refreshNav();
 
     /* spacer + 窗口控制 */

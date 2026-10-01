@@ -1,0 +1,12 @@
+{
+  "name": "wetube-verify",
+  "private": true,
+  "description": "WeTube 的本地回归测试依赖。应用本体是 Rust（cargo），这里只给 scripts/verify-*.js 用——其中三条整页注入脚本的测试需要 DOM，靠 jsdom 提供。",
+  "devDependencies": {
+    "jsdom": "^29.1.1"
+  },
+  "scripts": {
+    "verify": "node scripts/verify-download-events.js && node scripts/verify-state-lifecycle.js && node scripts/verify-theater-mode.js && node scripts/verify-captions-mode.js && node scripts/verify-player-quality.js && node scripts/verify-fullscreen.js && node scripts/verify-platform-ui.js && node scripts/verify-shortcuts.js && node scripts/verify-download-panel.js && node scripts/verify-panel-input.js",
+    "verify:no-dom": "node scripts/verify-download-events.js && node scripts/verify-state-lifecycle.js && node scripts/verify-theater-mode.js && node scripts/verify-captions-mode.js && node scripts/verify-player-quality.js"
+  }
+}

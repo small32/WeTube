@@ -80,6 +80,46 @@ for (const [key, label] of KEYS) {
   console.log(pad(label, 30) + row);
 }
 
+/**
+ * 行为回归：这些是实际点/按键才会暴露的问题，静态 DOM 结构看不出来。
+ *   1. 全屏（chrome 被隐藏）时页面不该还留着 36px 下推——导航事件会把 applyShift
+ *      再跑一遍，若它不看 chrome 是否可见，就会在全屏下切视频后多出一条空白带。
+ *   2. 后退按钮的 disabled 必须跟随 SPA 导航刷新——YouTube 走 pushState，不触发
+ *      popstate，只在挂载时算一次的话，disabled 的按钮连 click 都不派发，永远点不动。
+ */
+function behaviorChecks() {
+  const dom = new JSDOM(
+    `<!doctype html><html><head></head><body></body></html>`,
+    { url: "https://www.youtube.com/", runScripts: "outside-only", pretendToBeVisual: true }
+  );
+  const { window } = dom;
+  window.__WETUBE_PLATFORM__ = "windows";
+  window.eval(fs.readFileSync(path.join(SRC, "titlebar.js"), "utf8"));
+  window.eval(fs.readFileSync(path.join(SRC, "ui.js"), "utf8"));
+  window.document.dispatchEvent(new window.Event("DOMContentLoaded"));
+
+  const root = window.document.documentElement;
+  const hasShift = () => root.classList.contains("wetube-support-shift");
+  const out = [];
+
+  out.push(["① 初始有下推", hasShift() === true]);
+  window.__wetubeSetChromeVisible(false);
+  out.push(["① 隐藏 chrome 后下推被撤销", hasShift() === false]);
+  window.dispatchEvent(new window.Event("yt-navigate-finish"));
+  out.push(["① 全屏下导航不得把下推加回来", hasShift() === false]);
+  window.__wetubeSetChromeVisible(true);
+  out.push(["① 退出全屏后下推恢复", hasShift() === true]);
+
+  const back = window.document.querySelectorAll(".wetube-toolbar .icon-btn")[0];
+  out.push(["② 初始（无历史）后退按钮灰显", !!back && back.disabled === true]);
+  window.history.pushState({}, "", "/watch?v=aaaaaaaaaaa");
+  window.history.pushState({}, "", "/watch?v=bbbbbbbbbbb");
+  window.dispatchEvent(new window.Event("yt-navigate-finish"));
+  out.push(["② SPA 导航后后退按钮可点", !!back && back.disabled === false]);
+
+  return out;
+}
+
 const [win, mac, lin] = results;
 const checks = [
   // Windows：改动前是什么样，现在还得是什么样
@@ -100,6 +140,7 @@ const checks = [
   // Linux：同样依赖 HTML chrome，别被误伤
   ["Linux 保持完整 chrome", lin.chrome_bar === true && lin.window_ctrls === 3],
   ["Linux 页面已下推", lin.shift_class === true],
+  ...behaviorChecks(),
 ];
 
 console.log();

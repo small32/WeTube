@@ -97,7 +97,7 @@ async function main() {
     sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   };
   vm.runInNewContext(extract('async function retry(task', 'async function withPlayer(handler)'), featureCtx);
-  vm.runInNewContext(extract('// 自动进影院模式', '// 自动最大化播放器'), featureCtx);
+  vm.runInNewContext(extract('// 自动进影院模式', '// 自动关掉氛围模式'), featureCtx);
   assert.ok(YTE.features.automaticTheaterMode, '未注册 automaticTheaterMode');
 
   // ---- 场景：进入 watch 页，随后又来一次导航事件触发强制重同步 ----

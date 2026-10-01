@@ -205,10 +205,22 @@
     } catch (e) { return true; }
   }
 
+  /* 进行中的任务数（running / probing）。
+   * 注意别用 tasks.size 判断有没有活干：完成/失败的卡片会一直留在 tasks 里
+   * （只有 started 事件会把临时的 queued 卡迁移掉），tasks.size 只增不减，
+   * 一旦探测过就永远 >0，悬浮球再也不会在非视频页隐藏。 */
+  function activeTaskCount() {
+    let n = 0;
+    for (const t of tasks.values()) {
+      if (t.state === "running" || t.state === "probing") n += 1;
+    }
+    return n;
+  }
+
   function syncFabVisibility() {
     const fab = document.getElementById("wetube-dl-fab");
     if (!fab) return;
-    const show = downloadEnabled() && (isVideoPage() || tasks.size > 0);
+    const show = downloadEnabled() && (isVideoPage() || activeTaskCount() > 0);
     fab.style.display = show ? "flex" : "none";
     // 离开视频页时顺手收起面板，避免下次进来残留旧状态
     if (!show) {
@@ -304,7 +316,7 @@
     fab.appendChild(badge);
 
     function refreshBadge() {
-      const active = [...tasks.values()].filter((t) => t.state === "running" || t.state === "probing").length;
+      const active = activeTaskCount();
       badge.textContent = String(active);
       badge.style.display = active > 0 ? "flex" : "none";
       syncFabVisibility();
@@ -313,12 +325,26 @@
     send({ type: "download:sync" });
 
     /* 打开面板时预填当前视频链接 */
+    /* 上次自动填进去的链接。用户手输过就不再自动覆盖。 */
+    let lastAutoUrl = null;
+
+    /* 把当前视频链接填进输入框。
+     * 只在「输入框为空」或「里面还是上次自动填的值」时更新：这样切视频会跟着变
+     * （否则会探测到上一支视频），而用户自己粘的链接不会被冲掉。 */
+    function syncUrlPrefill() {
+      const cur = currentVideoUrl();
+      if (!cur) return;
+      if (!urlInput.value.trim() || urlInput.value.trim() === lastAutoUrl) {
+        urlInput.value = cur;
+        lastAutoUrl = cur;
+      }
+    }
+
     function togglePanel() {
       const opening = !panel.classList.contains("open");
       panel.classList.toggle("open");
       if (opening) {
-        const cur = currentVideoUrl();
-        if (cur && !urlInput.value.trim()) urlInput.value = cur;
+        syncUrlPrefill();
         urlInput.focus();
       }
     }
@@ -326,8 +352,8 @@
     /* ---- 悬浮球显隐 ----
      * YouTube 是 SPA：监听导航事件 + 初始检查，只在视频播放页显示悬浮球。
      * 捕获阶段监听，跟 enhancer/runtime.js 的做法一致。 */
-    window.addEventListener("yt-navigate-finish", syncFabVisibility, true);
-    window.addEventListener("popstate", syncFabVisibility, true);
+    window.addEventListener("yt-navigate-finish", () => { syncUrlPrefill(); syncFabVisibility(); }, true);
+    window.addEventListener("popstate", () => { syncUrlPrefill(); syncFabVisibility(); }, true);
     syncFabVisibility();
   }
 

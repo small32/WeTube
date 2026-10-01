@@ -132,6 +132,20 @@ const LOG_MAX_BYTES: u64 = 64 * 1024 * 1024;
 ///
 /// ⚠️ 别改成读 `TEMP` 环境变量 + 硬编码反斜杠：macOS 没有 `TEMP`，那样日志会
 /// 静默消失，翻译失败时无从查起——这个坑踩过一次。跨平台取路径一律走 `dirs`。
+/// 把日志文件截断为 0。
+///
+/// **不能对下面那个 append 句柄直接 `set_len(0)`**：Windows 下以 `.append(true)` 打开的文件，
+/// Rust 只请求 `FILE_GENERIC_WRITE & !FILE_WRITE_DATA`（不含写数据权限），而 `set_len` 走
+/// `SetFileInformationByHandle(FileEndOfFileInfo)`，需要写数据权限，必然 `ERROR_ACCESS_DENIED(5)`。
+/// 错误又被 `let _` 吞掉，长度不变、随后的 write_all 继续追加——注释里承诺的"超了就清空
+/// 从头写"在 Windows（主要分发平台）等于没写，日志无上限增长。
+/// 实测：append 句柄 `Err(5)` 且内容不变；另开一个只写句柄 `Ok(())` 且内容被清空。
+fn truncate_log(path: &std::path::Path) {
+    if let Ok(f) = std::fs::OpenOptions::new().write(true).open(path) {
+        let _ = f.set_len(0);
+    }
+}
+
 pub fn translate_log(message: &str) {
     #[cfg(debug_assertions)]
     eprintln!("[WeTube][translate] {message}");
@@ -144,10 +158,11 @@ pub fn translate_log(message: &str) {
     if std::fs::create_dir_all(&dir).is_err() {
         return;
     }
+    let path = dir.join("translate.log");
     let Ok(mut file) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(dir.join("translate.log"))
+        .open(&path)
     else {
         return;
     };
@@ -160,7 +175,7 @@ pub fn translate_log(message: &str) {
         .map(|meta| meta.len() > LOG_MAX_BYTES)
         .unwrap_or(false)
     {
-        let _ = file.set_len(0);
+        truncate_log(&path);
     }
 
     let epoch = std::time::SystemTime::now()
@@ -246,6 +261,43 @@ fn parse_gtx_response(body: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 日志轮转必须真的能把文件清空。
+    ///
+    /// 顺带在 Windows 上钉住"为什么不能对 append 句柄直接 set_len"这个前提——
+    /// 那个错误会被 `let _` 吞掉，表现为日志无上限增长，很难从现象反推。
+    #[test]
+    fn truncate_log_empties_the_file() {
+        let dir = std::env::temp_dir().join("wetube-truncate-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("translate.log");
+
+        std::fs::write(&path, b"AAAAAAAAAA\n").unwrap();
+        truncate_log(&path);
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 0, "truncate_log 应把文件清空");
+
+        #[cfg(windows)]
+        {
+            std::fs::write(&path, b"AAAAAAAAAA\n").unwrap();
+            let append = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .unwrap();
+            assert!(
+                append.set_len(0).is_err(),
+                "append 句柄在 Windows 上没有写数据权限，set_len 本来就该失败"
+            );
+            drop(append);
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().len(),
+                11,
+                "那次失败会让内容原封不动（错误被 let _ 吞掉）"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// 网络探针（默认忽略）：`cargo test -- --ignored` 手动跑，
     /// 打印真实 HTTP 状态与响应前 300 字节，用于诊断通道问题。

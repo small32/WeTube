@@ -507,7 +507,12 @@
 
 	F.automaticallyEnableClosedCaptions = {
 		enable: () => setClosedCaptions(true),
-		disable: () => getPlayer()?.unloadModule?.("captions"),
+		// 与 automaticTheaterMode 同理：runtime 的 force 重同步会对「仍启用」的功能先
+		// disable 再 enable，而 unloadModule 会真的把字幕模块卸掉（= 关掉字幕），
+		// enable 又是不返回 Promise 的 retry，两者并发时净效果是字幕被关。
+		// 这个功能的语义只是「自动开启」，关掉开关不该去动当前的字幕状态。
+		// 回归测试：scripts/verify-captions-mode.js
+		disable: () => {},
 	};
 
 	// 自动进影院模式
@@ -540,18 +545,6 @@
 		// 也都是空 disable，这里与它们保持一致。
 		// 回归测试：scripts/verify-theater-mode.js
 		disable: () => {},
-	};
-
-	// 自动最大化播放器
-	F.automaticallyMaximizePlayer = {
-		enable: () => {
-			document.body?.setAttribute("yte-maximized", "");
-			document.body?.style.setProperty("--yte-video-height", "100vh");
-		},
-		disable: () => {
-			document.body?.removeAttribute("yte-maximized");
-			document.body?.style.removeProperty("--yte-video-height");
-		},
 	};
 
 	// 自动关掉氛围模式：展开设置菜单，按文字找到那一项
@@ -644,17 +637,31 @@
 
 	// 默认画质
 	F.playerQuality = {
-		enable: async ({ quality } = {}) => {
+		enable: async ({ quality, fallbackStrategy } = {}) => {
 			if (!quality || quality === "auto") return;
 			const player = await waitForPlayer();
 			if (!player) return;
+
+			// 「画质不可用时的退让方向」决定拿不到目标档位时接受哪一边：
+			//   lower（默认）：接受不高于目标的档位——这正是本功能一直以来的行为
+			//   higher：接受不低于目标的档位
+			// QUALITY_ORDER.indexOf 对未知档位返回 -1（播放器日后加了新档位就可能出现），
+			// 那种一律接受，否则重试会空转到 10 秒超时、画质反而定不下来。
+			const desired = QUALITY_ORDER.indexOf(quality);
+			const acceptable = (current) => {
+				if (!current || current === quality) return true;
+				if (desired === -1 || QUALITY_ORDER.indexOf(current) === -1) return true;
+				return fallbackStrategy === "higher"
+					? !isBetter(quality, current)
+					: !isBetter(current, quality);
+			};
+
 			await retry(async () => {
 				try {
 					if (player.setPlaybackQualityRange) await player.setPlaybackQualityRange(quality);
 					else if (player.setPlaybackQuality) await player.setPlaybackQuality(quality);
 					else return false;
-					const current = await player.getPlaybackQuality?.();
-					return !current || current === quality || !isBetter(current, quality);
+					return acceptable(await player.getPlaybackQuality?.());
 				} catch {
 					return false;
 				}
@@ -728,7 +735,10 @@
 			const player = await waitForPlayer();
 			if (!player) return;
 			toggleBodyClass("yte-scroll-wheel-volume-control", true);
-			const { steps = 5, modifierKey = "ctrlKey", holdModifierKey = false, holdRightClick = false } = config;
+			const { modifierKey = "ctrlKey", holdModifierKey = false, holdRightClick = false } = config;
+			// steps 的默认值只在 undefined 时生效；0 是面板被清空后可能落库的非法值，
+			// 必须显式挡住——否则下面 `Math.round(x / 0) * 0` 会算出 NaN。
+			const steps = Number(config.steps) > 0 ? Number(config.steps) : 5;
 			on(wheelHost(player), "wheel", async (event) => {
 				if (holdModifierKey && !event[modifierKey]) return;
 				if (holdRightClick && event.buttons !== 2) return;
@@ -753,7 +763,10 @@
 		enable: async (config = {}) => {
 			const player = await waitForPlayer();
 			if (!player) return;
-			const { steps = 0.25, modifierKey = "altKey" } = config;
+			const { modifierKey = "altKey" } = config;
+			// 同 scrollWheelVolumeControl：steps 为 0 会让 `Math.round(x / 0) * 0` 变成 NaN，
+			// 而 video.playbackRate = NaN 会抛 TypeError（WebIDL 的受限 double）。
+			const steps = Number(config.steps) > 0 ? Number(config.steps) : 0.25;
 			on(wheelHost(player), "wheel", async (event) => {
 				if (!event[modifierKey]) return;
 				if (wheelOnSettingsMenu(event)) return;
