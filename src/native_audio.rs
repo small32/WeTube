@@ -5,6 +5,8 @@ use serde_json::Value;
 use std::ffi::{CStr, CString, c_char, c_void};
 use tao::event_loop::EventLoopProxy;
 
+const GAIN_DB: f64 = 5.;
+
 unsafe extern "C" {
     fn wetube_audio_create(
         web: *mut c_void,
@@ -85,7 +87,9 @@ fn parse_request(payload: &Value) -> Option<(bool, f64, &str)> {
     {
         return None;
     }
-    Some((enabled, db, request))
+    // The player button only toggles boost; persisted or incoming gain values
+    // cannot change the fixed application gain.
+    Some((enabled, GAIN_DB, request))
 }
 
 #[cfg(test)]
@@ -107,6 +111,10 @@ mod tests {
         }
         assert_eq!(
             parse_request(&json!({"enabled":true,"amount":5,"request":"page-1"})),
+            Some((true, 5., "page-1"))
+        );
+        assert_eq!(
+            parse_request(&json!({"enabled":true,"amount":20,"request":"page-1"})),
             Some((true, 5., "page-1"))
         );
     }

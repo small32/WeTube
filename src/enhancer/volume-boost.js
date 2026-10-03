@@ -1,7 +1,7 @@
 /*
  * 音量增强：移植 YouTube-Enhancer 的 AudioContext → GainNode 路线。
  * 参考：https://github.com/YouTube-Enhancer/extension/tree/6b1a2f6384071cc995dc7e6e06f02c6d3c66da37/src/features/volumeBoost
- * 上游 MIT 授权见 THIRD_PARTY_NOTICES.md。适配 WeTube 的设置及 SPA 生命周期。
+ * 上游 MIT 授权见 THIRD_PARTY_NOTICES.md。适配 WeTube 的播放器按钮及 SPA 生命周期。
  */
 (() => {
 	const YTE = window.__YTE;
@@ -17,7 +17,6 @@
 	let currentGraph = null;
 	let observer = null;
 	let button = null;
-	let enabled = false;
 	let videoKey = "";
 	let perVideoOn = false;
 	let scheduled = false;
@@ -27,18 +26,14 @@
 	let tooltip = null;
 	let tooltipVisible = false;
 
-	const amount = () => {
-		const value = Number(YTE.cfg("volumeBoost", "amount") ?? 5);
-		return Math.min(20, Math.max(0, Number.isFinite(value) ? value : 5));
-	};
-	const globalMode = () => YTE.cfg("volumeBoost", "mode") !== "逐视频";
-	const boosted = () => enabled && (globalMode() || perVideoOn);
+	const GAIN_DB = 5;
+	const boosted = () => perVideoOn;
 	const key = () => new URLSearchParams(location.search).get("v")
 		?? location.pathname.match(/^\/shorts\/([^/]+)/)?.[1] ?? "";
 
 	function updateButton() {
 		if (!button) return;
-		const db = amount();
+		const db = GAIN_DB;
 		const active = boosted() && (native ? nativeState.state === "active"
 			: !lastError && context?.state === "running" && currentGraph?.hasSamples);
 		let status = "关闭";
@@ -55,21 +50,21 @@
 		button.setAttribute("aria-pressed", String(boosted()));
 		button.classList.toggle("yte-volume-boost-active", Boolean(active));
 		button.classList.toggle("yte-volume-boost-pending", boosted() && !active);
-		const message = `音量增强：${status}\n点击切换；滚轮调增益，Shift/Ctrl 加大步长`;
+		const message = `音量增强：${status}\n点击开启或恢复原声 · 固定 5 dB`;
 		button.title = message;
 		button.setAttribute("aria-label", message);
 		if (tooltip?.textContent !== message && tooltip) tooltip.textContent = message;
 	}
 
 	function requestNative(on) {
-		const next = on ? `on:${amount()}` : "off";
+		const next = on ? `on:${GAIN_DB}` : "off";
 		if (nativeKey === next) return;
 		nativeKey = next;
 		nativeRequest = `${nativePage}:${++nativeSequence}`;
 		nativeState = { state: on ? "waiting" : "off", error: "" };
 		try {
 			if (typeof YTE.post !== "function") throw new Error("原生音频接口不可用");
-			YTE.post({ type: "volume-boost:set", enabled: on, amount: amount(), request: nativeRequest });
+			YTE.post({ type: "volume-boost:set", enabled: on, amount: GAIN_DB, request: nativeRequest });
 		} catch (err) {
 			nativeState = { state: "error", error: String(err.message ?? err) };
 		}
@@ -232,7 +227,7 @@
 			if (currentGraph !== nextGraph) lastError = "";
 			if (currentGraph && currentGraph !== nextGraph) currentGraph.gain.gain.value = 1;
 			currentGraph = nextGraph;
-			const target = 10 ** (amount() / 20);
+			const target = 10 ** (GAIN_DB / 20);
 			// YouTube 的普通 DOM 更新不应反复把增益切回原声再拉高。
 			if (currentGraph.gain.gain.value !== target) currentGraph.gain.gain.value = target;
 			resumeAudio();
@@ -248,8 +243,9 @@
 
 	function sync() {
 		if (!document?.documentElement) return; // 页面销毁后丢弃已排队的 DOM 更新
-		enabled = YTE.cfg("volumeBoost", "enabled") === true;
 		if (!/^\/(watch|shorts|live)(\/|$)/.test(location.pathname)) {
+			perVideoOn = false;
+			videoKey = "";
 			if (native) requestNative(false);
 			stopProbe();
 			hideTooltip();
@@ -282,24 +278,9 @@
 				button.addEventListener("focus", showTooltip);
 				button.addEventListener("blur", hideTooltip);
 				button.addEventListener("click", () => {
-					if (!enabled) {
-						YTE.setConfig("volumeBoost", "mode", "逐视频");
-						YTE.setConfig("volumeBoost", "enabled", true);
-						perVideoOn = true;
-					} else if (globalMode()) {
-						YTE.setConfig("volumeBoost", "mode", "逐视频");
-						perVideoOn = false;
-					} else perVideoOn = !perVideoOn;
+					perVideoOn = !perVideoOn;
 					sync();
 				});
-				button.addEventListener("wheel", (event) => {
-					if (!event.deltaY) return;
-					event.preventDefault();
-					event.stopPropagation(); // 播放器的滚轮音量功能不能同时处理
-					const step = (event.shiftKey ? 2.5 : 1) * (event.ctrlKey ? 5 : 1);
-					YTE.setConfig("volumeBoost", "amount", Math.min(20, Math.max(0, amount() + (event.deltaY < 0 ? step : -step))));
-					sync();
-				}, { passive: false });
 			}
 			if (volume) {
 				if (volume.nextElementSibling !== button) controls.insertBefore(button, volume.nextSibling);
@@ -318,23 +299,7 @@
 		queueMicrotask(() => { scheduled = false; sync(); });
 	}
 
-	YTE.features.volumeBoost = {
-		enable() {
-			enabled = true;
-			sync();
-		},
-		disable() {
-			stopProbe();
-			if (native) requestNative(false);
-			enabled = false;
-			if (currentGraph) currentGraph.gain.gain.value = 1;
-			currentGraph = null;
-			if (!YTE.cfg("volumeBoost", "enabled")) perVideoOn = false;
-			updateButton();
-		},
-	};
-
-	// 按钮入口与增强开关分开：默认关闭增强时，也可以直接点击按钮开启。
+	// 独立于设置运行，旧配置不影响开关和固定增益；切换视频恢复关闭。
 	function mount() {
 		observer = new MutationObserver(scheduleSync);
 		observer.observe(document.body ?? document.documentElement, { childList: true, subtree: true });

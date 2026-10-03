@@ -43,17 +43,13 @@ WeTube 是一个用 Rust 写的 YouTube 桌面端App：一个装 youtube.com 的
 
 ## 音量增强
 
-设置 → 播放器 → **音量增强**（默认关闭）。增益默认 5 dB，可调 0–20 dB：
-6 dB 约为原声的 2 倍，20 dB 约为 10 倍；较高增益可能失真。
+增益固定为 **5 dB**（约为原声的 1.8 倍），无需在增强设置中配置。
 
-增强按钮在播放页面始终显示，直接点击即可开启，再次点击恢复原声。
+增强按钮在播放页面始终显示，位于播放器音量按钮右侧。直接点击即可开启，
+再次点击恢复原声，切换视频后恢复关闭。滚轮不再调节增强增益。
 检测到音频进入处理通路后图标变蓝；等待启动、未检测到信号或启动失败时图标为黄色。
 鼠标悬停或键盘聚焦按钮可查看当前状态和增益。
-
-- **全局**：播放视频时自动应用增益。
-- **逐视频**：点击播放器音量按钮右侧的闪电声波按钮开关，切换视频后恢复关闭。
-- 在增强按钮上滚轮调节增益；Shift / Ctrl 加大步长。全局模式下点击按钮会转为逐视频并关闭当前增强。
-- 关闭设置后恢复原声，固定音量、音量记忆和滚轮调音量仍控制播放器的 0–100% 音量。
+固定音量、音量记忆和滚轮调音量仍控制播放器的 0–100% 音量。
 
 macOS 14.2 及更新版本使用原生 **Core Audio Process Tap**，处理 WeTube 的 WebKit
 音频进程输出，支持 AAC / Opus 流媒体。首次开启时，按系统提示允许系统音频录制权限；
@@ -66,7 +62,7 @@ macOS 14.2 及更新版本使用原生 **Core Audio Process Tap**，处理 WeTub
 Windows / Linux 保留 Web Audio 增益通路。
 
 本地验证：`pnpm run verify`；macOS 还可以运行
-`swift scripts/verify-volume-boost-webkit.swift`，用原生 WKWebView 验证 6 dB 增益及恢复原声。
+`swift scripts/verify-volume-boost-webkit.swift`，用原生 WKWebView 验证固定 5 dB 增益及恢复原声。
 该原生测试使用本地 WAV 信号，不代表 YouTube 流媒体兼容性。
 向脚本传入本地 AAC fragmented MP4 路径可检测 MSE 通路；复现内核缺陷时会明确报告信号缺失。
 macOS 原生后端的实际流媒体测试：`bash scripts/verify-native-audio.sh`，覆盖 AAC / Opus

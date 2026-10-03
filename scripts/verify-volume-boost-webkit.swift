@@ -53,12 +53,13 @@ window.AudioContext = class extends NativeContext {
     const node = super.createMediaElementSource(video); input = this.createAnalyser(); node.connect(input); return node;
   }
 };
-const config = {enabled: true, mode: '全局', amount: 6};
+const config = {enabled: true, mode: '全局', amount: 20};
 window.__YTE = {features: {}, cfg: (_, key) => config[key],
   getPlayer: () => document.getElementById('movie_player'), log: () => {}};
 </script><script>\(source)</script><script>
 const video = document.querySelector('video');
 \(media)
+document.addEventListener('DOMContentLoaded', () => document.querySelector('.yte-volume-boost-btn').click(), {once:true});
 video.play().catch(error => send({ok: false, message: String(error)}));
 const rms = node => {
   const samples = new Float32Array(node.fftSize); node.getFloatTimeDomainData(samples);
@@ -79,9 +80,9 @@ setTimeout(() => {
         result: '本机复现 MSE 音频数据缺失；新按钮正确显示兼容性提示', before, after, blue});
       return;
     }
-    if (!blue || ratio === null || Math.abs(ratio - 10 ** (6 / 20)) > 0.05)
-      throw Error('6 dB 增益不正确：' + ratio);
-    config.enabled = false; window.__YTE.features.volumeBoost.disable();
+    if (!blue || ratio === null || Math.abs(ratio - 10 ** (5 / 20)) > 0.05)
+      throw Error('5 dB 增益不正确：' + ratio);
+    button.click();
     setTimeout(() => {
       const restored = rms(output) / rms(input);
       send({ok: !button.classList.contains('yte-volume-boost-active') && Math.abs(restored - 1) < 0.05,
