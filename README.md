@@ -3,7 +3,7 @@
 WeTube 是一个用 Rust 写的 YouTube 桌面端App：一个装 youtube.com 的 `WKWebView` /
 `WebView2`，加后退 / 前进 / 刷新三个按钮（以及更多），同时支持 macOS 和 Windows，
 并把 [YouTube-Enhancer](https://github.com/YouTube-Enhancer/extension)
-扩展的功能直接内建进了程序——不是让你去装扩展，是程序自带。目前内置 **42 个功能、83 项设置**（含每个功能自己的「启用」开关，其余 41 项是可调参数）。
+扩展的功能直接内建进了程序——不是让你去装扩展，是程序自带。目前内置 **43 个功能、86 项设置**（含每个功能自己的「启用」开关，其余 43 项是可调参数）。
 
 | 平台   | 网页内核                    | 说明                                   |
 | ------ | --------------------------- | -------------------------------------- |
@@ -28,7 +28,7 @@ WeTube 是一个用 Rust 写的 YouTube 桌面端App：一个装 youtube.com 的
 
 点工具栏最右边的齿轮（或按 `Cmd/Ctrl + ,`）打开设置面板：
 
-- **83 项设置全部自动生成**，加一项只需要改 `src/enhancer/schema.json` 一处
+- **86 项设置全部自动生成**，加一项只需要改 `src/enhancer/schema.json` 一处
 - 按内容过滤 / 播放器 / 按钮 / Shorts / 播放列表 / 外观 / 高级分成 7 组，支持搜索
 - 改动即时生效，自动存盘
 
@@ -39,7 +39,21 @@ WeTube 是一个用 Rust 写的 YouTube 桌面端App：一个装 youtube.com 的
 | macOS   | `~/Library/Application Support/WeTube/settings.json` |
 | Windows | `%APPDATA%\WeTube\settings.json`                 |
 
-**进度**：42 个功能条目全部已实现，设置面板里每一项都能正常生效。
+**进度**：43 个功能条目全部已实现，设置面板里每一项都能正常生效。
+
+## 音量增强
+
+设置 → 播放器 → **音量增强**（默认关闭）。增益默认 5 dB，可调 0–20 dB：
+6 dB 约为原声的 2 倍，20 dB 约为 10 倍；较高增益可能失真。
+
+增强按钮在播放页面始终显示，直接点击即可开启，再次点击恢复原声。
+
+- **全局**：播放视频时自动应用增益。
+- **逐视频**：点击播放器音量按钮右侧的闪电声波按钮开关，切换视频后恢复关闭。
+- 在增强按钮上滚轮调节增益；Shift / Ctrl 加大步长。全局模式下点击按钮会转为逐视频并关闭当前增强。
+- 关闭设置后恢复原声，固定音量、音量记忆和滚轮调音量仍控制播放器的 0–100% 音量。
+
+实现参考 [YouTube-Enhancer 音量增强](https://github.com/YouTube-Enhancer/extension/tree/6b1a2f6384071cc995dc7e6e06f02c6d3c66da37/src/features/volumeBoost)，上游授权见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
 ## 字幕双语翻译
 

@@ -299,3 +299,13 @@ body.yte-videos-per-row ytd-rich-grid-renderer {
 	color: #3ea6ff;
 	opacity: 1;
 }
+
+/* 音量增强控制钮，与 YouTube 原生控制栏共用尺寸。 */
+.ytp-button.yte-volume-boost-btn {
+    width: 40px; min-width: 40px; padding: 0;
+    color: inherit;
+}
+.ytp-button.yte-volume-boost-btn svg {
+    width: 36px; height: 27px; vertical-align: middle; pointer-events: none;
+}
+.ytp-button.yte-volume-boost-active { color: #3ea6ff; }

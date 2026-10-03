@@ -43,8 +43,12 @@ pub fn translate(text: &str, target_lang: &str) -> Result<String, String> {
 
     match edge_request(&[payload.clone()], target_lang)
         .ok()
-        .and_then(|body| parse_edge_batch_response(&body, 1).into_iter().next().flatten())
-    {
+        .and_then(|body| {
+            parse_edge_batch_response(&body, 1)
+                .into_iter()
+                .next()
+                .flatten()
+        }) {
         Some(text) => Ok(text),
         // 主通道挂了再试 gtx。两个都失败时把两边的原因拼在一起返回，
         // 避免"静默失败"式的排查黑洞。
@@ -87,12 +91,47 @@ fn edge_request(texts: &[String], target_lang: &str) -> Result<String, String> {
 
 /// 批量翻译：整条字幕轨道按块送翻。Edge 接口原生支持字符串数组，
 /// 请求/响应按位对应，比逐句翻快一个数量级。
-/// 每项独立成败：失败的项返回 None，页面按原文兜底显示。
+/// Edge 不可用或缺项时，逐条用 Google 补齐；两个通道都失败才返回 None。
 pub fn translate_batch(texts: &[String], target_lang: &str) -> Vec<Option<String>> {
-    match edge_request(texts, target_lang) {
+    translate_batch_with(texts, target_lang, edge_request, translate_gtx)
+}
+
+fn translate_batch_with(
+    texts: &[String],
+    target_lang: &str,
+    edge: impl FnOnce(&[String], &str) -> Result<String, String>,
+    mut google: impl FnMut(&str, &str) -> Result<String, String>,
+) -> Vec<Option<String>> {
+    if texts.is_empty() {
+        return Vec::new();
+    }
+    let mut results = match edge(texts, target_lang) {
         Ok(body) => parse_edge_batch_response(&body, texts.len()),
         Err(_) => vec![None; texts.len()],
+    };
+    let missing = results.iter().filter(|item| item.is_none()).count();
+    if missing > 0 {
+        translate_log(&format!(
+            "batch google fallback items={missing}/{}",
+            texts.len()
+        ));
+        // 同一块内顺序请求，避免 Edge 故障时把每句字幕同时发给 Google。
+        for (index, (text, result)) in texts.iter().zip(results.iter_mut()).enumerate() {
+            if result.is_some() {
+                continue;
+            }
+            match google(text, target_lang) {
+                Ok(translated) if !translated.trim().is_empty() => *result = Some(translated),
+                Ok(_) => {
+                    translate_log(&format!("batch google fallback index={index} empty result"))
+                }
+                Err(err) => translate_log(&format!(
+                    "batch google fallback index={index} failed: {err}"
+                )),
+            }
+        }
     }
+    results
 }
 
 /// 批量响应解析：`[{translations:[{text}]} × N]`，按位取第 0 个译文。
@@ -373,5 +412,97 @@ mod tests {
         assert_eq!(results[0].as_deref(), Some("你好"));
         assert!(results[1].is_none());
         assert_eq!(parse_edge_batch_response("not json", 3).len(), 3);
+    }
+
+    #[test]
+    fn batch_prefers_edge_and_only_falls_back_for_missing_items() {
+        let texts = vec!["hello".into(), "world".into(), "again".into()];
+        let mut calls = Vec::new();
+        let results = translate_batch_with(
+            &texts,
+            "zh-CN",
+            |input, lang| {
+                assert_eq!(input, texts);
+                assert_eq!(lang, "zh-CN");
+                Ok(r#"[{"translations":[{"text":"你好"}]},{"translations":[]}]"#.into())
+            },
+            |text, lang| {
+                assert_eq!(lang, "zh-CN");
+                calls.push(text.to_string());
+                Ok(format!("Google:{text}"))
+            },
+        );
+        assert_eq!(calls, vec!["world", "again"]);
+        assert_eq!(
+            results,
+            vec![
+                Some("你好".into()),
+                Some("Google:world".into()),
+                Some("Google:again".into())
+            ]
+        );
+    }
+
+    #[test]
+    fn successful_edge_batch_does_not_call_google() {
+        let results = translate_batch_with(
+            &["hello".into()],
+            "en",
+            |_, _| Ok(r#"[{"translations":[{"text":"Hello"}]}]"#.into()),
+            |_, _| panic!("Edge 成功时不应请求 Google"),
+        );
+        assert_eq!(results, vec![Some("Hello".into())]);
+    }
+
+    #[test]
+    fn unavailable_edge_batch_uses_google_and_preserves_failed_positions() {
+        for edge_response in [
+            Err("timeout".into()),
+            Ok("invalid json".into()),
+            Ok("{}".into()),
+        ] {
+            let texts = vec![
+                "first".into(),
+                "second".into(),
+                "third".into(),
+                "fourth".into(),
+            ];
+            let mut calls = Vec::new();
+            let results = translate_batch_with(
+                &texts,
+                "ja",
+                |_, _| edge_response,
+                |text, lang| {
+                    assert_eq!(lang, "ja");
+                    calls.push(text.to_string());
+                    match text {
+                        "second" => Err("HTTP 429".into()),
+                        "third" => Ok("  ".into()),
+                        _ => Ok(format!("Google:{text}")),
+                    }
+                },
+            );
+            assert_eq!(calls, texts);
+            assert_eq!(
+                results,
+                vec![
+                    Some("Google:first".into()),
+                    None,
+                    None,
+                    Some("Google:fourth".into())
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn empty_batch_does_not_request_either_provider() {
+        let results = translate_batch_with(
+            &[],
+            "en",
+            |_, _| panic!("空批次不应请求 Edge"),
+            |_, _| panic!("空批次不应请求 Google"),
+        );
+        assert!(results.is_empty());
     }
 }

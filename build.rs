@@ -180,6 +180,7 @@ fn bundle_enhancer() {
         "ui.js",
         "runtime.js",
         "features.js",
+        "volume-boost.js",
         "panel.js",
     ]
     .iter()

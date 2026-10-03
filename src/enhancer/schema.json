@@ -856,6 +856,47 @@
       ]
     },
     {
+      "id": "volumeBoost",
+      "label": "音量增强",
+      "desc": "通过音频增益放大原声。全局自动启用，逐视频用音量按钮右侧的闪电声波按钮切换。",
+      "group": "player",
+      "pages": [
+        "watch",
+        "live",
+        "shorts"
+      ],
+      "fields": [
+        {
+          "key": "enabled",
+          "type": "boolean",
+          "default": false,
+          "label": "启用"
+        },
+        {
+          "key": "mode",
+          "type": "select",
+          "default": "全局",
+          "label": "应用模式",
+          "parent": "enabled",
+          "options": [
+            "全局",
+            "逐视频"
+          ]
+        },
+        {
+          "key": "amount",
+          "type": "number",
+          "default": 5,
+          "min": 0,
+          "max": 20,
+          "step": 1,
+          "label": "增益 (dB)",
+          "parent": "enabled",
+          "hint": "0 dB 为原声，6 dB 约 2 倍，20 dB 约 10 倍；较高增益可能失真。"
+        }
+      ]
+    },
+    {
       "id": "globalVolume",
       "label": "固定音量",
       "desc": "每次进视频都把音量设成固定值",
