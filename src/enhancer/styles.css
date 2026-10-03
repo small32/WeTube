@@ -309,3 +309,12 @@ body.yte-videos-per-row ytd-rich-grid-renderer {
     width: 36px; height: 27px; vertical-align: middle; pointer-events: none;
 }
 .ytp-button.yte-volume-boost-active { color: #3ea6ff; }
+.ytp-button.yte-volume-boost-pending { color: #ffc65c; }
+.yte-volume-boost-tooltip {
+    position: fixed; z-index: 2147483647;
+    width: max-content; max-width: 284px; padding: 8px 12px;
+    border-radius: 4px; background: rgba(28, 28, 28, .96);
+    color: #fff; font: 13px/1.5 sans-serif; white-space: pre-line;
+    pointer-events: none;
+}
+.yte-volume-boost-tooltip[hidden] { display: none; }

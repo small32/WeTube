@@ -127,6 +127,8 @@ cat > "$CONTENTS/Info.plist" <<PLIST
   <string>com.wecode.wetube</string>
   <key>CFBundleExecutable</key>
   <string>$APP_NAME</string>
+  <key>NSAudioCaptureUsageDescription</key>
+  <string>WeTube 需要访问自己的播放音频，以提供音量增强。音频仅实时处理，不会录制或保存。</string>
   <key>CFBundleIconFile</key>
   <string>AppIcon</string>
   <key>CFBundlePackageType</key>

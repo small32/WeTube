@@ -39,7 +39,7 @@ WeTube 是一个用 Rust 写的 YouTube 桌面端App：一个装 youtube.com 的
 | macOS   | `~/Library/Application Support/WeTube/settings.json` |
 | Windows | `%APPDATA%\WeTube\settings.json`                 |
 
-**进度**：43 个功能条目全部已实现，设置面板里每一项都能正常生效。
+**进度**：43 个功能条目已实现，部分功能受浏览器内核限制，详见下面的说明。
 
 ## 音量增强
 
@@ -47,11 +47,30 @@ WeTube 是一个用 Rust 写的 YouTube 桌面端App：一个装 youtube.com 的
 6 dB 约为原声的 2 倍，20 dB 约为 10 倍；较高增益可能失真。
 
 增强按钮在播放页面始终显示，直接点击即可开启，再次点击恢复原声。
+检测到音频进入处理通路后图标变蓝；等待启动、未检测到信号或启动失败时图标为黄色。
+鼠标悬停或键盘聚焦按钮可查看当前状态和增益。
 
 - **全局**：播放视频时自动应用增益。
 - **逐视频**：点击播放器音量按钮右侧的闪电声波按钮开关，切换视频后恢复关闭。
 - 在增强按钮上滚轮调节增益；Shift / Ctrl 加大步长。全局模式下点击按钮会转为逐视频并关闭当前增强。
 - 关闭设置后恢复原声，固定音量、音量记忆和滚轮调音量仍控制播放器的 0–100% 音量。
+
+macOS 14.2 及更新版本使用原生 **Core Audio Process Tap**，处理 WeTube 的 WebKit
+音频进程输出，支持 AAC / Opus 流媒体。首次开启时，按系统提示允许系统音频录制权限；
+音频仅实时处理，不录制或保存。等待授权或音频信号时保持原声，确认通路正常后才接管输出。
+暂停、静音、关闭增强或离开播放页面时解除接管；恢复播放时按当前开关重新开启。
+输出设备或采样率变化时重新建立通路。较早的 macOS 会显示版本要求并保留原声。
+
+辅助进程 PID 使用 WebKit 内部接口获取，并在调用前检测接口是否存在。无法确定进程、
+权限不足或设备格式不受支持时保持原声；不会按进程名猜测，也不会捕获其他应用的声音。
+Windows / Linux 保留 Web Audio 增益通路。
+
+本地验证：`pnpm run verify`；macOS 还可以运行
+`swift scripts/verify-volume-boost-webkit.swift`，用原生 WKWebView 验证 6 dB 增益及恢复原声。
+该原生测试使用本地 WAV 信号，不代表 YouTube 流媒体兼容性。
+向脚本传入本地 AAC fragmented MP4 路径可检测 MSE 通路；复现内核缺陷时会明确报告信号缺失。
+macOS 原生后端的实际流媒体测试：`bash scripts/verify-native-audio.sh`，覆盖 AAC / Opus
+及 6 / 12 dB 增益、关闭恢复。需提供 ffmpeg（可用 `FFMPEG_BIN` 指定），并按系统要求授权测试应用。
 
 实现参考 [YouTube-Enhancer 音量增强](https://github.com/YouTube-Enhancer/extension/tree/6b1a2f6384071cc995dc7e6e06f02c6d3c66da37/src/features/volumeBoost)，上游授权见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 

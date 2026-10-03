@@ -6,6 +6,12 @@
 (() => {
 	const YTE = window.__YTE;
 	if (!YTE) return;
+	const native = window.__WETUBE_PLATFORM__ === "macos";
+	let nativeKey = "";
+	let nativeRequest = "";
+	let nativeSequence = 0;
+	const nativePage = window.__WETUBE_PAGE_ID__ ?? crypto.randomUUID();
+	let nativeState = { state: "off", error: "" };
 	const graphs = new WeakMap();
 	let context = null;
 	let currentGraph = null;
@@ -16,6 +22,10 @@
 	let perVideoOn = false;
 	let scheduled = false;
 	let lastError = "";
+	let resumePending = null;
+	let probeTimer = null;
+	let tooltip = null;
+	let tooltipVisible = false;
 
 	const amount = () => {
 		const value = Number(YTE.cfg("volumeBoost", "amount") ?? 5);
@@ -29,9 +39,96 @@
 	function updateButton() {
 		if (!button) return;
 		const db = amount();
+		const active = boosted() && (native ? nativeState.state === "active"
+			: !lastError && context?.state === "running" && currentGraph?.hasSamples);
+		let status = "关闭";
+		if (boosted()) {
+			if (native && !active) status = nativeState.error || "请播放视频，等待原生音量增强启动";
+			else if (native) status = db === 0 ? "已连接音频 · 0 dB（原声）" : `开启 · ${db} dB（约 ${(10 ** (db / 20)).toFixed(1)} 倍）`;
+			else if (lastError) status = lastError;
+			else if (context?.state !== "running") status = "等待音频启动，请播放视频或点击播放器";
+			else if (!currentGraph?.hasSamples) status = currentGraph?.emptyFrames >= 12
+				? "未检测到可处理音频：请确认视频有声音；当前音轨也可能不兼容 macOS 音量增强"
+				: "等待音频信号，请播放视频";
+			else status = db === 0 ? "已连接音频 · 0 dB（原声）" : `开启 · ${db} dB（约 ${(10 ** (db / 20)).toFixed(1)} 倍）`;
+		}
 		button.setAttribute("aria-pressed", String(boosted()));
-		button.classList.toggle("yte-volume-boost-active", boosted());
-		button.title = lastError || `音量增强：${boosted() ? "开启" : "关闭"} · ${db} dB（约 ${(10 ** (db / 20)).toFixed(1)} 倍）\n点击切换；滚轮调增益，Shift/Ctrl 加大步长`;
+		button.classList.toggle("yte-volume-boost-active", Boolean(active));
+		button.classList.toggle("yte-volume-boost-pending", boosted() && !active);
+		const message = `音量增强：${status}\n点击切换；滚轮调增益，Shift/Ctrl 加大步长`;
+		button.title = message;
+		button.setAttribute("aria-label", message);
+		if (tooltip?.textContent !== message && tooltip) tooltip.textContent = message;
+	}
+
+	function requestNative(on) {
+		const next = on ? `on:${amount()}` : "off";
+		if (nativeKey === next) return;
+		nativeKey = next;
+		nativeRequest = `${nativePage}:${++nativeSequence}`;
+		nativeState = { state: on ? "waiting" : "off", error: "" };
+		try {
+			if (typeof YTE.post !== "function") throw new Error("原生音频接口不可用");
+			YTE.post({ type: "volume-boost:set", enabled: on, amount: amount(), request: nativeRequest });
+		} catch (err) {
+			nativeState = { state: "error", error: String(err.message ?? err) };
+		}
+	}
+	if (native) {
+		window.__wetubeNativeAudioEvent = (event) => {
+			if (event?.request !== nativeRequest || !["off", "waiting", "active", "error"].includes(event.state)) return;
+			nativeState = event;
+			updateButton();
+		};
+		window.addEventListener("pagehide", () => requestNative(false));
+		for (const event of ["playing", "pause", "ended", "volumechange", "emptied"]) {
+			document.addEventListener(event, (e) => { if (e.target?.tagName === "VIDEO") scheduleSync(); }, true);
+		}
+	}
+
+	function showTooltip() {
+		if (!tooltip) {
+			tooltip = document.createElement("div");
+			tooltip.className = "yte-volume-boost-tooltip";
+			tooltip.id = "yte-volume-boost-tooltip";
+			tooltip.setAttribute("role", "tooltip");
+			button.setAttribute("aria-describedby", tooltip.id);
+		}
+		const host = document.fullscreenElement ?? document.webkitFullscreenElement ?? document.body;
+		if (tooltip.parentElement !== host) host.appendChild(tooltip);
+		tooltipVisible = true;
+		updateButton();
+		const rect = button.getBoundingClientRect();
+		tooltip.style.left = `${Math.max(8, Math.min(rect.left, window.innerWidth - 308))}px`;
+		tooltip.style.bottom = `${Math.max(8, window.innerHeight - rect.top + 8)}px`;
+		tooltip.hidden = false;
+	}
+
+	function hideTooltip() {
+		tooltipVisible = false;
+		if (tooltip) tooltip.hidden = true;
+	}
+
+	function stopProbe() {
+		clearTimeout(probeTimer);
+		probeTimer = null;
+	}
+
+	function probeAudio() {
+		stopProbe();
+		const graph = currentGraph;
+		if (!graph || !boosted()) return;
+		if (context.state === "running" && !graph.video.paused && !graph.video.ended
+			&& !graph.video.muted && graph.video.volume > 0 && !document.hidden) {
+			graph.analyser.getFloatTimeDomainData(graph.samples);
+			const received = graph.samples.some(value => Number.isFinite(value) && Math.abs(value) > 1e-7);
+			if (received) {
+				graph.hasSamples = true;
+				graph.emptyFrames = 0;
+			} else if (!graph.hasSamples) graph.emptyFrames++;
+		}
+		updateButton();
+		probeTimer = setTimeout(probeAudio, 250);
 	}
 
 	function createIcon() {
@@ -59,11 +156,23 @@
 	// 媒体元素一旦接到 AudioContext，就不能简单断开/close，否则原声也会消失。
 	// 停用时保留通路并将增益恢复为 1；同一 video 只创建一次 source。
 	function resumeAudio() {
-		if (context?.state === "suspended") {
-			void context.resume().catch((err) => {
-				lastError = `音量增强等待播放或点击：${err.message ?? err}`;
+		// WebKit 回到前台时还可能处于 interrupted；仅处理 suspended 会漏掉恢复。
+		if (!context || context.state === "running" || context.state === "closed") return;
+		if (resumePending) return;
+		const graph = currentGraph;
+		try {
+			resumePending = Promise.resolve(context.resume()).then(() => {
+				if (currentGraph === graph) lastError = context.state === "running" ? "" : "音频未启动，请播放视频后重试";
+			}).catch((err) => {
+				if (currentGraph === graph) lastError = `音频启动失败：${err.message ?? err}`;
+			}).finally(() => {
+				resumePending = null;
+				if (currentGraph === graph && boosted()) probeAudio();
 				updateButton();
 			});
+		} catch (err) {
+			lastError = `音频启动失败：${err.message ?? err}`;
+			updateButton();
 		}
 	}
 
@@ -74,6 +183,10 @@
 			const AudioContext = window.AudioContext ?? window.webkitAudioContext;
 			if (!AudioContext) throw new Error("当前浏览器不支持音频增益");
 			context = new AudioContext();
+			context.addEventListener("statechange", () => {
+				if (context.state === "running" && currentGraph) lastError = "";
+				updateButton();
+			});
 			// 即使设置已关闭，已接管的原声通路也需要在回到前台时恢复。
 			document.addEventListener("visibilitychange", () => {
 				if (!document.hidden) resumeAudio();
@@ -84,30 +197,48 @@
 		}
 		const gain = context.createGain();
 		gain.gain.value = 1;
+		const analyser = context.createAnalyser();
+		analyser.fftSize = 2048;
 		const source = context.createMediaElementSource(video);
 		source.connect(gain);
 		gain.connect(context.destination);
-		graph = { source, gain };
+		// 旁路分析输入，不能再次连接 destination，否则会叠加两份声音。
+		source.connect(analyser);
+		graph = { source, gain, analyser, video, samples: new Float32Array(analyser.fftSize), hasSamples: false, emptyFrames: 0 };
+		video.addEventListener("loadstart", () => {
+			graph.hasSamples = false;
+			graph.emptyFrames = 0;
+			if (currentGraph === graph) updateButton();
+		});
 		graphs.set(video, graph);
 		return graph;
 	}
 
 	function apply(video) {
+		if (native) {
+			// macOS never creates a MediaElementAudioSource: Core Audio captures the
+			// decoded process output, including the MSE path Web Audio cannot read.
+			requestNative(Boolean(boosted() && video && !video.paused && !video.ended && !video.muted && video.volume > 0));
+			return;
+		}
 		if (!video || !boosted()) {
+			stopProbe();
 			if (currentGraph) currentGraph.gain.gain.value = 1;
 			currentGraph = null;
 			return;
 		}
 		try {
 			const nextGraph = createGraph(video);
+			if (currentGraph !== nextGraph) lastError = "";
 			if (currentGraph && currentGraph !== nextGraph) currentGraph.gain.gain.value = 1;
 			currentGraph = nextGraph;
 			const target = 10 ** (amount() / 20);
 			// YouTube 的普通 DOM 更新不应反复把增益切回原声再拉高。
 			if (currentGraph.gain.gain.value !== target) currentGraph.gain.gain.value = target;
-			lastError = "";
 			resumeAudio();
+			if (!probeTimer) probeAudio();
 		} catch (err) {
+			stopProbe();
 			if (currentGraph) currentGraph.gain.gain.value = 1;
 			currentGraph = null;
 			lastError = `音量增强不可用：${err.message ?? err}`;
@@ -119,6 +250,9 @@
 		if (!document?.documentElement) return; // 页面销毁后丢弃已排队的 DOM 更新
 		enabled = YTE.cfg("volumeBoost", "enabled") === true;
 		if (!/^\/(watch|shorts|live)(\/|$)/.test(location.pathname)) {
+			if (native) requestNative(false);
+			stopProbe();
+			hideTooltip();
 			if (currentGraph) currentGraph.gain.gain.value = 1;
 			currentGraph = null;
 			button?.remove();
@@ -143,6 +277,10 @@
 				button.className = "ytp-button yte-volume-boost-btn";
 				button.appendChild(createIcon());
 				button.setAttribute("aria-label", "切换音量增强");
+				button.addEventListener("mouseenter", showTooltip);
+				button.addEventListener("mouseleave", hideTooltip);
+				button.addEventListener("focus", showTooltip);
+				button.addEventListener("blur", hideTooltip);
 				button.addEventListener("click", () => {
 					if (!enabled) {
 						YTE.setConfig("volumeBoost", "mode", "逐视频");
@@ -171,6 +309,7 @@
 			}
 		}
 		updateButton();
+		if (tooltipVisible && !button?.isConnected) hideTooltip();
 	}
 
 	function scheduleSync() {
@@ -185,6 +324,8 @@
 			sync();
 		},
 		disable() {
+			stopProbe();
+			if (native) requestNative(false);
 			enabled = false;
 			if (currentGraph) currentGraph.gain.gain.value = 1;
 			currentGraph = null;

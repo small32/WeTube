@@ -6,6 +6,7 @@ version = 4
 name = "WeTube"
 version = "3.0.6"
 dependencies = [
+ "cc",
  "dark-light",
  "dirs",
  "image",

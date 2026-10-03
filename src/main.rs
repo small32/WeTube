@@ -40,6 +40,8 @@ mod cookies;
 mod download;
 mod shortcuts;
 mod translate;
+#[cfg(target_os = "macos")]
+mod native_audio;
 use config::ConfigStore;
 
 const APP_NAME: &str = "WeTube";
@@ -174,6 +176,8 @@ const DEEPDARK_PRESETS_JS: &str = include_str!("enhancer/deepdark-presets.js");
 /// 事件循环里流动的消息：工具栏指令、菜单点击、或设置面板的配置变更。
 #[derive(Debug, Clone)]
 enum Command {
+    #[cfg(target_os = "macos")]
+    NativeAudioEvent(Value),
     Ipc(String, bool),
     #[cfg(target_os = "macos")]
     Menu(String),
@@ -359,6 +363,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         log_err(&format!("启动时导出 cookie 失败：{err}"));
     }
 
+    #[cfg(target_os = "macos")]
+    let native_audio = {
+        use wry::WebViewExtMacOS;
+        let wk = webview.webview();
+        native_audio::NativeAudio::new(&*wk as *const _ as *mut std::ffi::c_void, event_loop.create_proxy())
+    };
     let mut download_history = download::EventHistory::default();
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
@@ -395,6 +405,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             // 事件循环销毁（Cmd+Q / 关窗口 / 菜单退出都会走到这里）：
             // 把还在跑的 yt-dlp 下载子进程一并杀掉，别让它们变孤儿继续后台下载。
             Event::LoopDestroyed => {
+                #[cfg(target_os = "macos")]
+                native_audio.shutdown();
                 download::kill_all();
             }
             Event::UserEvent(Command::Ipc(msg, trusted)) => {
@@ -413,10 +425,16 @@ fn main() -> Result<(), Box<dyn Error>> {
                 }
                 match serde_json::from_str::<Value>(&msg) {
                     Ok(payload) if payload["type"] == "app:ready" => {
+                        #[cfg(target_os = "macos")]
+                        native_audio.stop();
                         let config = if trusted { store.full_config() } else { serde_json::json!({}) };
                         eval(&webview, &format!("window.__wetubeBootstrap?.({}, {}, {}, {});",
                             payload["pageId"], config, shortcuts::registry_json(store.shortcuts()), trusted));
                         sync_fullscreen_chrome(&window, &webview);
+                    }
+                    #[cfg(target_os = "macos")]
+                    Ok(payload) if payload["type"] == "volume-boost:set" && trusted => {
+                        native_audio.set(&payload);
                     }
                     Ok(payload) if payload["type"] == "download:sync" && trusted => {
                         eval(&webview, &format!("window.__wetubeDownloadEvent?.({});",
@@ -431,6 +449,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                     ),
                     _ => act(&webview, &window, &msg),
                 }
+            }
+            #[cfg(target_os = "macos")]
+            Event::UserEvent(Command::NativeAudioEvent(payload)) => {
+                eval(&webview, &format!("window.__wetubeNativeAudioEvent?.({payload});"));
             }
             Event::UserEvent(Command::DownloadEvent(event)) => {
                 download_history.record(&event);

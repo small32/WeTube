@@ -2,6 +2,31 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 fn main() {
+    if target_os() == "macos" {
+        let mut native = cc::Build::new();
+        native
+            .file("src/native_audio.m")
+            .flag("-fobjc-arc")
+            .flag("-fblocks")
+            .flag("-std=c11")
+            .flag("-mmacosx-version-min=11.0")
+            .compile("wetube_native_audio");
+        // Rust disables the C driver's default runtime libraries. Objective-C
+        // @available needs Clang's platform-version helper even with static LTO.
+        let output = native.get_compiler().to_command().arg("-print-resource-dir")
+            .output().expect("无法定位 Clang 运行时");
+        assert!(output.status.success(), "Clang 运行时查询失败");
+        let resource = String::from_utf8(output.stdout).expect("Clang 路径不是 UTF-8");
+        let runtime = PathBuf::from(resource.trim()).join("lib/darwin");
+        assert!(runtime.join("libclang_rt.osx.a").exists(), "缺少 Clang macOS 运行时");
+        println!("cargo:rustc-link-search=native={}", runtime.display());
+        println!("cargo:rustc-link-lib=static=clang_rt.osx");
+        for framework in ["Foundation", "CoreAudio", "WebKit"] {
+            println!("cargo:rustc-link-lib=framework={framework}");
+        }
+        println!("cargo:rerun-if-changed=src/native_audio.m");
+        println!("cargo:rerun-if-changed=src/native_audio_dsp.h");
+    }
     bundle_enhancer();
     window_icon_rgba();
 
