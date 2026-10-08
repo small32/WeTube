@@ -366,6 +366,13 @@
 
 	function customColors(colors) {
 		if (!colors) return "";
+		// `input[type=color]` 只认 #RRGGBB，8 位带 alpha 的值会被浏览器
+		// 规范化成 #000000（设置面板里显示成纯黑，用户一点就把阴影写成黑）。
+		// 所以 schema 里的默认值就是 7 位的，透明度在这里补回来：
+		// 7 位色值统一加 0x4d（≈30%）的 alpha，历史遗留的 8 位值原样使用。
+		const shadow = /^#[0-9a-fA-F]{6}$/.test(colors.colorShadow ?? "")
+			? `${colors.colorShadow}4d`
+			: colors.colorShadow;
 		return [
 			":root {",
 			`  --main-color: ${colors.mainColor};`,
@@ -374,7 +381,7 @@
 			`  --hover-background: ${colors.hoverBackground};`,
 			`  --main-text: ${colors.mainText};`,
 			`  --dimmer-text: ${colors.dimmerText};`,
-			`  --shadow: 0 1px 0.5px ${colors.colorShadow};`,
+			`  --shadow: 0 1px 0.5px ${shadow};`,
 			"}",
 		].join("\n");
 	}
@@ -450,7 +457,7 @@
 					input.value = url.href;
 				} catch { /* 保留无法解析的输入 */ }
 			};
-			watchMutations(F.shareShortener, clean, { childList: true, subtree: true, attributes: true });
+			watchMutations(F.shareShortener, clean, { childList: true, subtree: true });
 			clean();
 		},
 		disable: () => unwatchMutations(F.shareShortener),
@@ -472,35 +479,67 @@
 				console.warn("[WeTube] skipContinueWatching：没找到续播回调，YouTube 可能改版了");
 				return;
 			}
+			// 记住被改的是哪一个元素。SPA 换过 DOM 之后 querySelector 拿到的是新元素，
+			// 拿新元素去"还原"只会把旧元素的方法永远留在被替换的状态上。
+			F.skipContinueWatching.element = el;
 			F.skipContinueWatching.hook = hook;
 			F.skipContinueWatching.original = el[hook];
 			el[hook] = () => {};
 		},
 		disable() {
-			const el = document.querySelector("ytd-watch-grid, ytd-watch-flexy");
-			if (!el) return;
-			const { hook, original } = F.skipContinueWatching;
-			if (!hook) return;
-			if (original) el[hook] = original;
-			else delete el[hook];
+			const { element: el, hook, original } = F.skipContinueWatching;
+			F.skipContinueWatching.element = null;
 			F.skipContinueWatching.hook = null;
 			F.skipContinueWatching.original = null;
+			if (!el || !hook) return;
+			if (original) el[hook] = original;
+			else delete el[hook];
 		},
 	};
 
 	// ---------------------------------------------------------------- 播放器自动化
 
-	// 自动关掉自动播放。用户自己打开过一次之后就不再干预。
+	// 自动关掉自动播放。用户自己打开过一次之后就不再干预（见下面 enable）。
+	//
+	// 用户手动打开过没有，用 sessionStorage 记一笔：点过自动播放开关就算"用户
+	// 自己要开"，之后本功能不再把它关回去——desc 里承诺了这一点，而实现里原来
+	// 没有任何标记，下次导航照样关。
+	const AUTOPLAY_USER_KEY = "yte:autoplayUserEnabled";
+	const autoplayUserEnabled = () => {
+		try {
+			return sessionStorage.getItem(AUTOPLAY_USER_KEY) === "1";
+		} catch {
+			return false;
+		}
+	};
+	const rememberAutoplayIntent = (event) => {
+		if (!event.target?.closest?.(".ytp-autonav-toggle")) return;
+		// 点击后 YouTube 会异步切状态，等一拍再读。
+		setTimeout(() => {
+			const toggle = document.querySelector(".ytp-autonav-toggle-button");
+			const on = toggle?.getAttribute("aria-checked") === "true";
+			try {
+				if (on) sessionStorage.setItem(AUTOPLAY_USER_KEY, "1");
+				else sessionStorage.removeItem(AUTOPLAY_USER_KEY);
+			} catch {
+				/* 隐私模式下 sessionStorage 可能不可用 */
+			}
+		}, 0);
+	};
+
 	F.automaticallyDisableAutoPlay = {
-		enable: () =>
+		enable: () => {
+			if (autoplayUserEnabled()) return;
+			on(document, "click", rememberAutoplayIntent, "automaticallyDisableAutoPlay", true);
 			void retry(() => {
 				const toggle = document.querySelector(".ytp-autonav-toggle-button");
 				if (!toggle) return false;
 				if (toggle.getAttribute("aria-checked") !== "true") return true;
 				document.querySelector(".ytp-autonav-toggle")?.click();
 				return toggle.getAttribute("aria-checked") === "false";
-			}, { attempts: 12, interval: 250, timeout: 6000 }),
-		disable: () => {},
+			}, { attempts: 12, interval: 250, timeout: 6000 });
+		},
+		disable: () => off("automaticallyDisableAutoPlay"),
 	};
 
 	const subtitlesButton = () => document.querySelector("button.ytp-subtitles-button");
@@ -671,9 +710,20 @@
 	}
 
 	// 默认画质
+	// qualityApplied 记录"当前播放器上的画质是不是我们设的"。
+	//
+	// 原来 disable 无条件 `setPlaybackQualityRange("auto")`：开着这个功能、用户
+	// 手动选了 4K 之后，任何一次导航都会把它打回 auto。而每次 SPA 导航 runtime 都会
+	// force 重放（disable → enable），已经设好的画质也会被先清成 auto 再设回来，
+	// 播放器跟着重新缓冲。
+	let qualityApplied = false;
+
 	F.playerQuality = {
 		enable: async ({ quality, fallbackStrategy } = {}) => {
-			if (!quality || quality === "auto") return;
+			if (!quality || quality === "auto") {
+				qualityApplied = false;
+				return;
+			}
 			const player = await waitForPlayer();
 			if (!player) return;
 
@@ -691,18 +741,30 @@
 					: !isBetter(current, quality);
 			};
 
+			// 只要成功调用过一次设置器就算"我们改过画质"，之后 disable 才有责任复位。
+			let applied = false;
 			await retry(async () => {
 				try {
-					if (player.setPlaybackQualityRange) await player.setPlaybackQualityRange(quality);
-					else if (player.setPlaybackQuality) await player.setPlaybackQuality(quality);
-					else return false;
+					if (player.setPlaybackQualityRange) {
+						await player.setPlaybackQualityRange(quality);
+						applied = true;
+					} else if (player.setPlaybackQuality) {
+						await player.setPlaybackQuality(quality);
+						applied = true;
+					} else return false;
 					return acceptable(await player.getPlaybackQuality?.());
 				} catch {
 					return false;
 				}
 			}, { attempts: 10, interval: 500, timeout: 10000 });
+			qualityApplied = applied;
 		},
 		disable: async () => {
+			if (!qualityApplied) return;
+			qualityApplied = false;
+			// 仍然处于开启态 = 这次是 SPA 导航 / 配置热改后的 force 重放，
+			// 紧接着的 enable 会把画质设回去；中间掉一下 auto 只会让播放器重新缓冲。
+			if (YTE.isEnabled?.("playerQuality")) return;
 			const player = getPlayer();
 			await player?.setPlaybackQualityRange?.("auto");
 		},
@@ -964,7 +1026,14 @@
 			let pending = null;
 			let flushTimer = null;
 			const flush = () => {
-				flushTimer = null;
+				// 必须先 clearTimeout —— 只把变量置 null 的话定时器还在跑：
+				// pagehide / visibilitychange / disable 收尾写之后，旧的 10s 定时器
+				// 仍然活着，下一次 scheduleFlush 又新建一个 → 孤儿定时器堆积
+				// （实测 5 轮 enable/disable 残留 7 个）。
+				if (flushTimer !== null) {
+					clearTimeout(flushTimer);
+					flushTimer = null;
+				}
 				if (!pending) return;
 				writeHistory(pending);
 				pending = null;
@@ -974,14 +1043,14 @@
 				if (flushTimer) return;
 				flushTimer = setTimeout(flush, 10000);
 			};
-			const persist = () => {
-				flush();
-				if (pagehideHandler) window.removeEventListener("pagehide", pagehideHandler);
-				if (visibilityHandler) document.removeEventListener("visibilitychange", visibilityHandler);
-			};
 			const pagehideHandler = () => flush();
 			const visibilityHandler = () => {
 				if (document.visibilityState === "hidden") flush();
+			};
+			const persist = () => {
+				flush();
+				window.removeEventListener("pagehide", pagehideHandler);
+				document.removeEventListener("visibilitychange", visibilityHandler);
 			};
 			window.addEventListener("pagehide", pagehideHandler);
 			document.addEventListener("visibilitychange", visibilityHandler);
@@ -1755,8 +1824,32 @@
 	/**
 	 * 启动翻译引擎：等字幕容器出现、挂 MutationObserver、装回传回调。
 	 * 幂等：已在跑且容器还连着时直接成功返回。
+	 *
+	 * 注意：真正干活的是下面的 `startEngineInner`，外面这层只负责"同一次导航
+	 * 只启动一次"的去重（见 E16 说明）。
 	 */
-	async function startEngine() {
+	let engineStart = null;
+	let engineStartKey = "";
+
+	function startEngine() {
+		// 同一次导航的多个触发源（两个导航事件 + runtime force 的 enable）
+		// 会先后调进来。若第一次还在跑（等播放器、抓字幕轨道），第二次直接
+		// 复用同一个 Promise：否则第二遍的 stopEngine() 会把第一遍在途的
+		// 抓轨整个 abort 掉，白抓一遍又重抓一遍。
+		const key = location.href;
+		if (engineStart && engineStartKey === key) return engineStart;
+		const pending = startEngineInner().finally(() => {
+			if (engineStart === pending) {
+				engineStart = null;
+				engineStartKey = "";
+			}
+		});
+		engineStart = pending;
+		engineStartKey = key;
+		return pending;
+	}
+
+	async function startEngineInner() {
 		stopEngine();
 		const generation = subtitleState.generation;
 		const pageUrl = location.href;
@@ -1872,6 +1965,10 @@
 
 	/** 停引擎：摘 observer/timeupdate、删译文层、恢复原生字幕。不动 state.on（由调用方管）。 */
 	function stopEngine() {
+		// 在途启动一并作废：generation 一旦递增，正在跑的那次 startEngine 结果就
+		// 不再可用，去重缓存必须跟着清，否则紧接着重开会拿到那个注定 false 的旧 Promise。
+		engineStart = null;
+		engineStartKey = "";
 		subtitleState.generation += 1;
 		subtitleState.controller?.abort();
 		subtitleState.controller = null;
@@ -1902,16 +1999,48 @@
 	/**
 	 * SPA 切视频后播放器 DOM 整体重建：按钮、字幕容器都会失联。
 	 * runtime 在配置没变时不会重调 enable，所以必须自己监听导航事件重挂。
+	 *
+	 * E16：同一次导航里 `yt-navigate-finish` 与 `yt-page-data-updated` 会先后各来一次，
+	 * runtime 导航后还会 force 一次 disable→enable（enable 里也会 startEngine），
+	 * 叠加起来一次切视频能跑 3 遍——每遍都 stopEngine() + 重新抓轨道 + 重新提交整批
+	 * 翻译请求，等于白烧一次字幕请求和一个翻译批。所以这里做一个 150ms 合并窗口，
+	 * 把同一轮导航的多次触发收成一次；disable 时清掉，不留孤儿定时器。
 	 */
-	function reattach() {
+	const REATTACH_DEBOUNCE = 150;
+	const REATTACH_MAX_RETRY = 3;
+	let reattachTimer = 0;
+	let reattachTries = 0;
+
+	function reattachNow() {
 		void injectButton();
-		if (subtitleState.on) void startEngine();
+		if (!subtitleState.on) return;
+		void startEngine().then((ok) => {
+			// 播放器/字幕容器还没就绪时 startEngine 返回 false。补一次延迟重试，
+			// 免得"切完视频字幕再也没回来"；设上限，失败就交给下一次导航事件。
+			if (ok || !subtitleState.on) return;
+			if (reattachTries >= REATTACH_MAX_RETRY) return;
+			reattachTries += 1;
+			clearTimeout(reattachTimer);
+			reattachTimer = setTimeout(() => {
+				reattachTimer = 0;
+				reattachNow();
+			}, 800);
+		});
+	}
+
+	function reattach() {
+		if (reattachTimer) clearTimeout(reattachTimer);
+		reattachTimer = setTimeout(() => {
+			reattachTimer = 0;
+			reattachTries = 0;
+			reattachNow();
+		}, REATTACH_DEBOUNCE);
 	}
 
 	F.subtitleTranslation = {
 		enable: async () => {
 			// 两个事件都监听：navigate-finish 覆盖页面跳转，page-data-updated
-			// 覆盖同页换视频/播放器晚就绪的场景。
+			// 覆盖同页换视频/播放器晚就绪的场景。两者重复由 reattach 内部合并。
 			subtitleState.navigateHandler = reattach;
 			document.addEventListener("yt-navigate-finish", reattach, true);
 			document.addEventListener("yt-page-data-updated", reattach, true);
@@ -1921,9 +2050,20 @@
 			// 字号设置变更时 syncFeature 会重跑 enable，这里即时套用新字号。
 			applyOverlayFont();
 			// 会话内已经开过翻译的话（比如从别的页面回到 watch），自动恢复。
+			// 先把挂起的重挂取消，由下面这一次启动统一负责，避免启动两遍。
+			if (reattachTimer) {
+				clearTimeout(reattachTimer);
+				reattachTimer = 0;
+			}
+			reattachTries = 0;
 			if (subtitleState.on) await startEngine();
 		},
 		disable: () => {
+			if (reattachTimer) {
+				clearTimeout(reattachTimer);
+				reattachTimer = 0;
+			}
+			reattachTries = 0;
 			stopEngine();
 			subtitleState.button?.remove();
 			subtitleState.button = null;

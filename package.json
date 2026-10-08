@@ -6,7 +6,7 @@
     "jsdom": "^29.1.1"
   },
   "scripts": {
-    "verify": "node scripts/verify-download-events.js && node scripts/verify-state-lifecycle.js && node scripts/verify-theater-mode.js && node scripts/verify-captions-mode.js && node scripts/verify-player-quality.js && node scripts/verify-fullscreen.js && node scripts/verify-platform-ui.js && node scripts/verify-shortcuts.js && node scripts/verify-download-panel.js && node scripts/verify-panel-input.js && node scripts/verify-volume-boost.js",
-    "verify:no-dom": "node scripts/verify-download-events.js && node scripts/verify-state-lifecycle.js && node scripts/verify-theater-mode.js && node scripts/verify-captions-mode.js && node scripts/verify-player-quality.js"
+    "verify": "node scripts/verify-download-events.js && node scripts/verify-state-lifecycle.js && node scripts/verify-enhancer-features.js && node scripts/verify-theater-mode.js && node scripts/verify-captions-mode.js && node scripts/verify-player-quality.js && node scripts/verify-fullscreen.js && node scripts/verify-platform-ui.js && node scripts/verify-shortcuts.js && node scripts/verify-download-panel.js && node scripts/verify-panel-input.js && node scripts/verify-volume-boost.js",
+    "verify:no-dom": "node scripts/verify-download-events.js && node scripts/verify-state-lifecycle.js && node scripts/verify-enhancer-features.js && node scripts/verify-theater-mode.js && node scripts/verify-captions-mode.js && node scripts/verify-player-quality.js"
   }
 }

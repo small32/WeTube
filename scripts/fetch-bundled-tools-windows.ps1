@@ -46,10 +46,21 @@ Set-Content -Path (Join-Path $vendor "yt-dlp.version") -Value $YtDlpVersion -NoN
 
 # ---- ffmpeg ----
 # 只取压缩包里的 bin/ffmpeg.exe，不落 ffplay/ffprobe（一个就 98MB，没必要）。
+#
+# 缓存判断的坑：$FfmpegSha256 是**下载的 zip** 的哈希（下面 :56 校验 zip 用的
+# 就是它），而 vendor/ 里留下的是**解压出来的 exe**。以前直接拿 exe 去比这个
+# 值，两者永远不可能相等 → 缓存从不命中，每次构建都重下 106MB。
+# 现在解出 exe 后把它的哈希写进 ffmpeg.exe.sha256，缓存判断改成比这个戳。
 $ffmpeg = Join-Path $vendor "ffmpeg.exe"
+$ffmpegStamp = Join-Path $vendor "ffmpeg.exe.sha256"
 $zip = Join-Path $vendor "ffmpeg-$FfmpegVersion-essentials_build.zip"
 $ffmpegUrl = "https://github.com/GyanD/codexffmpeg/releases/download/$FfmpegVersion/ffmpeg-$FfmpegVersion-essentials_build.zip"
-if ((Test-Path $ffmpeg) -and ((Get-Sha256 $ffmpeg) -eq $FfmpegSha256.ToLower())) {
+$ffmpegCached = $false
+if ((Test-Path $ffmpeg) -and (Test-Path $ffmpegStamp)) {
+  $recorded = (Get-Content -Raw $ffmpegStamp).Trim()
+  if ($recorded -and ((Get-Sha256 $ffmpeg) -eq $recorded)) { $ffmpegCached = $true }
+}
+if ($ffmpegCached) {
   Write-Host "ffmpeg $FfmpegVersion 已存在且校验通过"
 } else {
   Write-Host "下载 ffmpeg $FfmpegVersion（约 106MB）..."
@@ -69,6 +80,7 @@ if ((Test-Path $ffmpeg) -and ((Get-Sha256 $ffmpeg) -eq $FfmpegSha256.ToLower()))
   } finally {
     $archive.Dispose()
   }
+  Set-Content -Path $ffmpegStamp -Value (Get-Sha256 $ffmpeg) -NoNewline -Encoding ASCII
   if (-not $KeepArchive) { Remove-Item -Force $zip }
 }
 Set-Content -Path (Join-Path $vendor "ffmpeg.version") -Value $FfmpegVersion -NoNewline -Encoding ASCII

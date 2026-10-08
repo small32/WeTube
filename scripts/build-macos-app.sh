@@ -18,12 +18,31 @@ ICONSET="icons/AppIcon.iconset"
 #   yt-dlp  —— 官方 stable release（PyInstaller 打包，整体 GPLv3+，与本项目 GPL-3.0 兼容）。
 #              每次构建都自动查 GitHub API 对比 pin 版本与最新 stable，
 #              不是最新就自动改 pin 重入构建（YTDLP_AUTO_UPDATE=0 可关掉只提示）。
-#   ffmpeg  —— osxexperts.net 静态构建（GPLv3，含 x264/x265 编码器）
 YTDLP_VERSION="2026.08.19"
 YTDLP_URL="https://github.com/yt-dlp/yt-dlp/releases/download/${YTDLP_VERSION}/yt-dlp_macos"
 YTDLP_MACOS_SHA256="0f192b7ec147ab6288885d6351d9ab67367640029b4377576ef46dd79cf7b202"
-FFMPEG_URL="https://www.osxexperts.net/ffmpeg9arm.zip"
-FFMPEG_SHA256="d0c06c5c68ce48af3143b262f7a9118a7c9f67de1e237fcc24ffb14df9c67af9"
+#   ffmpeg  —— osxexperts.net 静态构建（GPLv3，含 x264/x265 编码器）
+#
+# ⚠️ ffmpeg 这两条地址是 osxexperts 的**无版本号直链**：上游发新版是原地替换同名
+#    文件，所以这里 pin 死的 SHA256 迟早会对不上，`fetch_tool` 会直接中止构建
+#    （这是刻意的 fail-closed）。届时先按 URL 打开看看是不是换版本了，再更新：
+#      1. 改本文件头部这两对 URL/SHA256；
+#      2. `release.yml` 的「准备 Intel(x86_64) 外置工具」步骤不再自己硬编码，
+#         它 `source` 本文件头部的 FFMPEG_INTEL_* —— 所以只要改这一处。
+#    临时绕过（别长期用）：同名环境变量覆盖，例如
+#      FFMPEG_ARM_SHA256=<新哈希> FFMPEG_ARM_URL=<新地址> ./scripts/build-macos-app.sh
+#
+# ⚠️ 版本偏斜：Intel 仍停在 ffmpeg 8。osxexperts 只出 ffmpeg9arm.zip，
+#    没有对应版本的 Intel 包（ffmpeg9intel.zip 实测 404），所以两个架构的
+#    ffmpeg 主版本不同。yt-dlp 用到的合并/remux/提音频参数在 8/9 上行为一致，
+#    但评估画质/编码行为的问题时要记得这一层差异。上游哪天补了 Intel 版，
+#    把 FFMPEG_INTEL_* 换过去即可（记得同时换 zip 与解出二进制的哈希）。
+FFMPEG_ARM_URL="${FFMPEG_ARM_URL:-https://www.osxexperts.net/ffmpeg9arm.zip}"
+FFMPEG_ARM_SHA256="${FFMPEG_ARM_SHA256:-d0c06c5c68ce48af3143b262f7a9118a7c9f67de1e237fcc24ffb14df9c67af9}"
+# Intel 版只被 release.yml 使用（脚本的 Intel 分支要求构建机 PATH 里有
+# x86_64 ffmpeg）。哈希是**下载的那个 zip** 的，不是解出来的 ffmpeg 的。
+FFMPEG_INTEL_URL="${FFMPEG_INTEL_URL:-https://www.osxexperts.net/ffmpeg80intel.zip}"
+FFMPEG_INTEL_SHA256="${FFMPEG_INTEL_SHA256:-2d24d22db78c87f394a5822867acd5c5dc5e762cd261a44bd26923f3a5af3e07}"
 # qjs —— QuickJS-NG 的 JS runtime（EJS）：YouTube 播放器挑战需要跑 JS，
 # 没有它 yt-dlp 会报 "No supported JavaScript runtime" 警告。
 # 用 ~1MB 的 QuickJS 替代 ~81MB 的 deno（yt-dlp 官方支持，要求 QuickJS-NG
@@ -88,10 +107,10 @@ PY
 check_ytdlp_latest
 
 if [ -n "$TARGET" ]; then
-  cargo build --release --target "$TARGET"
+  cargo build --release --locked --target "$TARGET"
   BIN_DIR="target/$TARGET/release"
 else
-  cargo build --release
+  cargo build --release --locked
   BIN_DIR="target/release"
 fi
 
@@ -112,7 +131,15 @@ fi
 # 版本号唯一来源是 Cargo.toml 的 [package].version，这里读出来同时用于
 # CFBundleShortVersionString（展示版本）与 CFBundleVersion（构建号）。
 # 两者跟着版本走，免得改了 Cargo.toml 却忘了同步 plist。
-VERSION="$(cargo metadata --no-deps --format-version 1 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])' 2>/dev/null || echo 1.0.0)"
+#
+# 解析失败**必须中止**：以前回退成 1.0.0，于是 Info.plist、zip 文件名、
+# 二进制里的 CARGO_PKG_VERSION 三者会不一致，而且没有任何报错提示。
+VERSION="$(cargo metadata --no-deps --format-version 1 2>/dev/null \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])' 2>/dev/null || true)"
+if [ -z "$VERSION" ]; then
+  echo "错误：无法从 Cargo.toml 解析版本号（cargo metadata 失败）" >&2
+  exit 1
+fi
 
 cat > "$CONTENTS/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -172,7 +199,13 @@ fetch_tool() { # url sha256 dest
     exit 1
   fi
   if ! verify_sha "$dest" "$sha"; then
-    echo "错误：$dest 哈希校验失败（预期 $sha)" >&2
+    echo "错误：$dest 哈希校验失败" >&2
+    echo "      预期 $sha" >&2
+    echo "      实际 $(shasum -a 256 "$dest" | awk '{print $1}')" >&2
+    # 无版本号直链（osxexperts 的 ffmpeg）上游换版本时就会走到这里。别当成投毒
+    # 直接删包重下——先确认来源，再把脚本头部的 URL/SHA 一起更新。
+    echo "      若来源是 osxexperts 的 ffmpeg：多半是上游原地换了版本。" >&2
+    echo "      先核对 $url ，再更新 scripts/build-macos-app.sh 头部的 URL/SHA。" >&2
     rm -f "$dest"
     exit 1
   fi
@@ -207,8 +240,8 @@ else
   else
     TOOL_ARCH="arm64"
     # ffmpeg/ffprobe：osxexperts 的 zip 里就是 ARM 裸二进制。
-    if [ ! -f "$VENDOR_DIR/ffmpeg" ] || ! verify_sha "$VENDOR_DIR/ffmpeg" "$FFMPEG_SHA256"; then
-      fetch_tool "$FFMPEG_URL" "$FFMPEG_SHA256" "$VENDOR_DIR/ffmpeg9arm.zip"
+    if [ ! -f "$VENDOR_DIR/ffmpeg" ] || ! verify_sha "$VENDOR_DIR/ffmpeg" "$FFMPEG_ARM_SHA256"; then
+      fetch_tool "$FFMPEG_ARM_URL" "$FFMPEG_ARM_SHA256" "$VENDOR_DIR/ffmpeg9arm.zip"
       unzip -o -j -q "$VENDOR_DIR/ffmpeg9arm.zip" ffmpeg -d "$BIN_DIR_RES"
       mv "$BIN_DIR_RES/ffmpeg" "$VENDOR_DIR/ffmpeg"
       rm -f "$VENDOR_DIR/ffmpeg9arm.zip"
@@ -230,9 +263,16 @@ else
   echo "已打包：yt-dlp ${YTDLP_VERSION} + ffmpeg + qjs（Resources/bin）"
 fi
 
+# 清 quarantine 属性必须覆盖**整个** bundle（以前只清了 Resources/bin，
+# MacOS/ 与顶层目录下的属性会漏掉），且必须在签名之前——签名是对 package 内容
+# 取哈希，签完再改属性会把签名弄失效。
+xattr -cr "$APP_DIR" 2>/dev/null || true
+
 # ad-hoc 签名：本机双击即可打开。要分发给别人请换成 Developer ID 并做公证。
 # 注意：必须在把外部二进制放进 Resources 之后签——签名覆盖整个 bundle。
-codesign --force --deep --sign - "$APP_DIR" 2>/dev/null \
-  || echo "提示：codesign 失败，可稍后手动执行 codesign --force --deep --sign - \"$APP_DIR\""
+#
+# 失败不再降级成提示：CI 会直接发布这个 .app，静默跳过就等于发布一个
+# 双击打不开的包。宁可构建失败也不要产出无签名的产物。
+codesign --force --deep --sign - "$APP_DIR"
 
 echo "完成：$APP_DIR"

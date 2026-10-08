@@ -13,9 +13,11 @@ on:
         required: false
         type: string
 
-# gh release create/upload 需要写权限。
+# 默认只读。写权限按最小化原则单独下放给真正需要它的 publish job——
+# prepare/windows/macos 都会执行第三方 build script 与 curl 外部二进制，
+# 让它们默认持有 contents: write 属于不必要的纵深防御缺口。
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: "release-${{ github.event.inputs.tag || github.ref_name }}"
@@ -60,16 +62,37 @@ jobs:
           VERSION="$(git show "$TAG:Cargo.toml" | sed -n 's/^version *= *"\(.*\)"/\1/p')"
           VERSION="${VERSION%%$'\n'*}"
           [ -n "$VERSION" ] || { echo "无法从 $TAG 的 Cargo.toml 解析版本号"; exit 1; }
-          if [ "$GITHUB_EVENT_NAME" = "push" ] && [ "$TAG" != "v$VERSION" ]; then
-            echo "::warning::tag $TAG 与 Cargo.toml 版本 $VERSION 不一致"
+          # tag 与 Cargo.toml 版本必须严格一致：只警告的话会出现
+          # tag v3.1.0 而资产叫 WeTube-3.0.7-*.zip 的错配，用户下载到的东西
+          # 与 Release 标题对不上，事后很难查。直接失败。
+          if [ "$TAG" != "v$VERSION" ]; then
+            echo "::error::tag $TAG 与 Cargo.toml 版本 $VERSION 不一致（应为 v$VERSION）"
+            exit 1
           fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "解析结果：tag=$TAG  version=$VERSION"
 
+  verify:
+    name: 回归验证
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - name: 安装依赖
+        run: npm ci
+
+      # 发布前的硬门禁：前端回归不过就不许构建产物。
+      # （Rust 侧的单测在 windows job 里跑，那边才有真实的内嵌工具载荷。）
+      - name: 跑 scripts/verify-*.js
+        run: npm run verify
+
   windows:
     name: Windows x64
-    needs: prepare
+    needs: [prepare, verify]
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
@@ -87,19 +110,35 @@ jobs:
             'vendor/yt-dlp.exe.xz' = 1MB
             'vendor/qjs.exe.xz'    = 100KB
           }
+          # xz 容器的固定魔数：FD 37 7A 58 5A 00。
+          # 光看体积挡得住 130 字节的 LFS 指针，挡不住"体积够大的错误内容"
+          # （比如把一个解压后的 exe 误当成 .xz 传上来），补一条魔数校验。
+          $xzMagic = '253,55,122,88,90,0'
           foreach ($f in $expect.Keys) {
             if (-not (Test-Path $f)) { throw "缺少 $f" }
             $len = (Get-Item $f).Length
             if ($len -lt $expect[$f]) { throw "$f 只有 $len 字节，疑似 Git LFS 指针未展开" }
-            Write-Host ("{0}  {1:N0} 字节" -f $f, $len)
+            $fs = [System.IO.File]::OpenRead((Resolve-Path $f))
+            try {
+              $buf = New-Object byte[] 6
+              $null = $fs.Read($buf, 0, 6)
+            } finally { $fs.Close() }
+            if (($buf -join ',') -ne $xzMagic) {
+              throw "$f 的头部不是 xz 魔数（$($buf -join ',')），内容可疑"
+            }
+            Write-Host ("{0}  {1:N0} 字节  xz✓" -f $f, $len)
           }
 
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: '. -> target'
 
+      # 先跑测试再构建：内嵌工具的真实解压/执行测试只有这里能跑。
+      - name: 跑 Rust 测试
+        run: cargo test --locked -j 2
+
       - name: 构建
-        run: cargo build --release
+        run: cargo build --release --locked
 
       - name: 打包
         shell: pwsh
@@ -107,9 +146,14 @@ jobs:
           $exe = 'target/release/WeTube.exe'
           if (-not (Test-Path $exe)) { throw "未生成 $exe" }
           $len = (Get-Item $exe).Length
-          Write-Host ("WeTube.exe  {0:N0} 字节" -f $len)
-          # 内嵌 ffmpeg/yt-dlp/qjs 的 xz 载荷约 40MB，明显偏小说明没内嵌进去。
-          if ($len -lt 20MB) { throw "WeTube.exe 只有 $len 字节，内嵌工具可能未打进包" }
+          # 内嵌的 xz 载荷是原样 include_bytes! 进 exe 的，所以 exe 体积必然
+          # ≥ 三个 .xz 之和。按实际求和来判断"有没有少嵌一个"——
+          # 固定阈值（原来写死 20MB）只能发现"全都没嵌"，少一个照样放过。
+          $embedded = (Get-ChildItem vendor/*.xz | Measure-Object -Property Length -Sum).Sum
+          Write-Host ("WeTube.exe  {0:N0} 字节；内嵌载荷应 ≥ {1:N0} 字节" -f $len, $embedded)
+          if ($len -le $embedded) {
+            throw "WeTube.exe 只有 $len 字节，小于内嵌工具载荷总和 $embedded，疑似有工具未打进包"
+          }
           Compress-Archive -Path $exe `
             -DestinationPath "WeTube-${{ needs.prepare.outputs.version }}-windows-x64.zip" `
             -CompressionLevel Optimal
@@ -124,7 +168,7 @@ jobs:
 
   macos:
     name: macOS ${{ matrix.label }}
-    needs: prepare
+    needs: [prepare, verify]
     strategy:
       fail-fast: false
       matrix:
@@ -149,21 +193,32 @@ jobs:
           workspaces: '. -> target'
           key: ${{ matrix.label }}
 
+      # bundle-macos-libs.py 的传递依赖重定位逻辑有纯 Python 单测（Darwin 专属，
+      # 用临时 dylib 验证 @rpath 改写后不依赖原库）。它不需要任何系统权限，
+      # 最适合放在这里跑——以前全仓没有任何调用方，等于死代码。
+      - name: 验证 dylib 打包逻辑
+        run: python3 scripts/test-bundle-macos-libs.py
+
       # build-macos-app.sh 对 arm64 会自己下载 pin 死哈希的 ffmpeg/qjs；
       # 但 Intel 分支要求 PATH 里已有 x86_64 的 ffmpeg 与 qjs，这里备好。
-      # 两个哈希都是首次取件时算出来 pin 在这里的（与脚本里 FFMPEG_SHA256 /
-      # QJS_SHA256 同样的做法），改动必须同步更新。
+      #
+      # ffmpeg 的 URL/哈希不在本文件里重复一遍：脚本头部是唯一真源，
+      # 这里 `source` 出那两对常量。以前两边各写一份，上游换版本时要改两处，
+      # 漏一处就是"下载的 URL 与校验的哈希对不上"这种最难查的失败。
+      # （osxexperts 的地址不带版本号，上游发新版会原地替换同名文件。）
       - name: 准备 Intel(x86_64) 外置工具
         if: matrix.target == 'x86_64-apple-darwin'
         run: |
           set -euo pipefail
+          source <(grep -E '^FFMPEG_(ARM|INTEL)_(URL|SHA256)=' scripts/build-macos-app.sh)
+          : "${FFMPEG_INTEL_URL:?没能从 build-macos-app.sh 取出 FFMPEG_INTEL_URL}"
+          : "${FFMPEG_INTEL_SHA256:?没能从 build-macos-app.sh 取出 FFMPEG_INTEL_SHA256}"
           TOOLS="$RUNNER_TEMP/wetube-tools"
           mkdir -p "$TOOLS"
           # ffmpeg：osxexperts 的 Intel 静态构建（与 arm 版同源，无外部 dylib 依赖）。
-          curl -fL --retry 3 -o "$RUNNER_TEMP/ffmpeg80intel.zip" \
-            "https://www.osxexperts.net/ffmpeg80intel.zip"
-          echo "2d24d22db78c87f394a5822867acd5c5dc5e762cd261a44bd26923f3a5af3e07  $RUNNER_TEMP/ffmpeg80intel.zip" \
-            | shasum -a 256 -c -
+          # 注意这个哈希属于**下载的 zip**，不是解出来的 ffmpeg。
+          curl -fL --retry 3 -o "$RUNNER_TEMP/ffmpeg80intel.zip" "$FFMPEG_INTEL_URL"
+          echo "$FFMPEG_INTEL_SHA256  $RUNNER_TEMP/ffmpeg80intel.zip" | shasum -a 256 -c -
           unzip -o -j -q "$RUNNER_TEMP/ffmpeg80intel.zip" ffmpeg -d "$TOOLS"
           # qjs：QuickJS-NG，与构建脚本 pin 的 0.16.2 同版本。
           curl -fL --retry 3 -o "$TOOLS/qjs" \
@@ -190,9 +245,12 @@ jobs:
           APP="target/${{ matrix.target }}/release/WeTube.app"
           test -d "$APP" || { echo "未生成 $APP"; exit 1; }
           echo "--- 签名信息 ---"
-          codesign -dv "$APP" 2>&1 || true
+          codesign -dv "$APP"
+          # 硬校验：build-macos-app.sh 里 codesign 已经改成失败即中止，
+          # 这里再验一次最终产物——签名结构损坏的 .app 发布出去就是双击打不开。
+          codesign --verify --deep --strict --verbose=2 "$APP"
           echo "--- 内嵌工具 ---"
-          ls -l "$APP/Contents/Resources/bin" || true
+          ls -l "$APP/Contents/Resources/bin"
           # 用 ditto 保留 .app 的目录结构与权限位，zip 解开即可直接运行。
           ditto -c -k --keepParent "$APP" \
             "WeTube-${{ needs.prepare.outputs.version }}-${{ matrix.asset }}.zip"
@@ -208,6 +266,9 @@ jobs:
     name: 发布 Release
     needs: [prepare, windows, macos]
     runs-on: ubuntu-latest
+    # 只有这一步需要写权限（gh release create/upload）。
+    permissions:
+      contents: write
     steps:
       - uses: actions/download-artifact@v8
         with:

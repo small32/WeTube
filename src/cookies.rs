@@ -201,6 +201,9 @@ mod imp {
     /// 字段顺序：域、是否含子域、路径、是否仅 HTTPS、过期时间、名、值。
     /// 没名字的条目跳过；过期时间拿不到就写 0（会话 cookie 的写法）。
     fn cookie_line(cookie: &ICoreWebView2Cookie) -> Option<String> {
+        // 每个 PWSTR 读完就立刻转 String 并释放，不能留到最后统一放：
+        // 中间任何一次 `.ok()?` 提前返回，之前读到的 COM 堆内存就永远漏了。
+        // 导出发生在启动、每次 probe、每次 start，是高频路径，漏不起。
         let mut name = PWSTR::null();
         unsafe { cookie.Name(&mut name) }.ok()?;
         let name = pwstr_to_string(name);
@@ -209,16 +212,18 @@ mod imp {
         }
         let mut value = PWSTR::null();
         unsafe { cookie.Value(&mut value) }.ok()?;
+        let value = pwstr_to_string(value);
         let mut domain = PWSTR::null();
         unsafe { cookie.Domain(&mut domain) }.ok()?;
+        let domain = pwstr_to_string(domain);
         let mut path = PWSTR::null();
         unsafe { cookie.Path(&mut path) }.ok()?;
+        let path = pwstr_to_string(path);
         let mut secure = BOOL::default();
         unsafe { cookie.IsSecure(&mut secure) }.ok()?;
         let mut expires = 0f64;
         unsafe { cookie.Expires(&mut expires) }.ok()?;
 
-        let domain = pwstr_to_string(domain);
         // WebView2 的 Domain 属性既不带前导点，也不区分 host-only / 带 Domain
         // 属性，拿不到「是否含子域」这个标志。YouTube 的登录态 cookie 本来
         // 就是 `.youtube.com`（含子域），一律按含子域写：写成 host-only 的话
@@ -235,9 +240,7 @@ mod imp {
         let secure_flag = if secure.as_bool() { "TRUE" } else { "FALSE" };
         let expiry = if expires > 0.0 { expires as i64 } else { 0 };
         Some(format!(
-            "{domain}\t{include_sub}\t{path}\t{secure_flag}\t{expiry}\t{name}\t{value}",
-            path = pwstr_to_string(path),
-            value = pwstr_to_string(value),
+            "{domain}\t{include_sub}\t{path}\t{secure_flag}\t{expiry}\t{name}\t{value}"
         ))
     }
 

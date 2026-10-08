@@ -23,7 +23,9 @@ let html = """
 <div class="ytp-left-controls"><div class="ytp-volume-area"><button class="ytp-mute-button"></button></div></div></div>
 <script>
 window.__WETUBE_PLATFORM__='macos'; window.__WETUBE_PAGE_ID__='native-mse-test';
-const config={enabled:false,mode:'逐视频',amount:6};
+// 配置里的 amount 只是占位：增益由 Rust 侧归一成固定 GAIN_DB，
+// 这个测试也按 BOOST_DB 传（见 userContentController 的注释）。
+const config={enabled:false,mode:'逐视频',amount:5};
 window.__YTE={features:{},cfg:(_,key)=>config[key],setConfig:(_,key,value)=>config[key]=value,
   getPlayer:()=>document.getElementById('movie_player'),log:()=>{},
   post:payload=>window.webkit.messageHandlers.native.postMessage(payload)};
@@ -64,8 +66,12 @@ class Receiver: NSObject, WKScriptMessageHandler {
     func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
         guard let data = message.body as? [String: Any] else { return }
         if message.name == "result" { finish(data); return }
-        guard let on = data["enabled"] as? Bool, let amount = data["amount"] as? Double, let request = data["request"] as? String else { return }
-        request.withCString { updateAudio(engine, on, amount, $0) }
+        guard let on = data["enabled"] as? Bool, let request = data["request"] as? String else { return }
+        // 增益写死成 BOOST_DB：生产链路上 Rust 的 parse_request 会把任何 amount
+        // 归一成固定 5 dB（native_audio.rs 的 GAIN_DB），页面传来的 amount 根本不参与
+        // 计算。测试直接驱动 .m，如果照着页面里的 config.amount 传进去，量到的就是
+        // 另一个增益，断言必然失败。
+        request.withCString { updateAudio(engine, on, BOOST_DB, $0) }
     }
     func status(_ json: String) {
         if finished { return }
@@ -86,7 +92,14 @@ class Receiver: NSObject, WKScriptMessageHandler {
                 if let peak = expectedSourcePeak, abs(Double(values[0]) - peak) > peak * 0.2 {
                     self.finish(["ok":false,"message":"捕获音频与测试源幅度不一致","inputPeak":values[0],"expectedPeak":peak]); return
                 }
-                guard values[2] == 1, abs(ratio - expected) < 0.08 else {
+                guard values[2] == 1 else {
+                    self.finish(["ok":false,"message":"原生音量增强未接管原声","input":values[0],"output":values[1],"ratio":ratio]); return
+                }
+                // 输出经过 ±1 硬限幅（见 native_audio_dsp.h 的 wetube_audio_sample）：
+                // 输入幅度够大时输出会截顶，ratio 必然低于理论增益——那是限幅不是 bug。
+                // 只有不会截顶的场景才校验比值。
+                let wouldClip = Double(values[0]) * expected > 1.0
+                if !wouldClip, abs(ratio - expected) >= 0.08 {
                     self.finish(["ok":false,"message":"原生流媒体增益不正确","input":values[0],"output":values[1],"ratio":ratio]); return
                 }
                 self.ratios.append(ratio)
@@ -119,7 +132,7 @@ let view = WKWebView(frame:NSRect(x:0,y:0,width:650,height:250),configuration:co
 receiver.web = view
 receiver.engine = createAudio(Unmanaged.passUnretained(view).toOpaque(), nativeEvent, Unmanaged.passUnretained(receiver).toOpaque())
 let window = NSWindow(contentRect:view.frame,styleMask:[.titled,.closable],backing:.buffered,defer:false)
-window.title = "WeTube 原生音量增强验证（6 / 12 dB）"
+window.title = "WeTube 原生音量增强验证（固定 5 dB）"
 window.contentView = view
 window.center(); window.makeKeyAndOrderFront(nil); app.activate(ignoringOtherApps:true)
 view.loadHTMLString(html,baseURL:URL(string:"https://www.youtube.com/watch?v=local-native-audio"))

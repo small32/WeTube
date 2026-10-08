@@ -455,9 +455,17 @@
     const brandText = document.createElement("span");
     brandText.textContent = "WeTube";
     brand.appendChild(brandText);
-    // 不再绑 dblclick：双击 logo 会先派发两次 click（回到首页导航两次）
-    // 再切一次最大化。品牌区就是回首页，最大化交给标题栏空白处双击。
-    brand.addEventListener("click", () => send("home"));
+    // 不再绑 dblclick：这样双击 logo 时不会"顺带切一次最大化"。
+    // 但浏览器对双击本身就是派发**两次 click**，"回到首页"于是还会连发两次
+    // （两次历史导航，第二次往往是空转，但后退栈上会多出一步）。
+    // 300ms 窗口内只认一次——人手连点两次 HOME 的间隔远大于这个值。
+    let lastHomeAt = 0;
+    brand.addEventListener("click", () => {
+      const now = Date.now();
+      if (now - lastHomeAt < 300) return;
+      lastHomeAt = now;
+      send("home");
+    });
 
     /* 菜单条：macOS 上由系统菜单栏接管，不渲染 HTML 菜单。 */
     const menuStrip = document.createElement("div");
@@ -598,8 +606,9 @@
         if (Math.hypot(moveEv.screenX - startX, moveEv.screenY - startY) < 4) return;
         dragging = true;
         cleanup();
-        // Windows 与 Linux 都去掉了原生标题栏，只能由 Rust 调 tao 的
-        // drag_window 接管；原来只判 windows，Linux 上窗口根本拖不动。
+        // Windows 与 Linux 都去掉了原生标题栏，只能由 Rust 接管拖动：
+        // Windows 发 WM_SYSCOMMAND，Linux 调 tao 的 drag_window()；macOS 保留原生标题栏。
+        // 三边判定必须一致，否则会出现「发送了但 Rust 没这个分支」的静默失效。
         if (window.__WETUBE_PLATFORM__ !== "macos") send("window-drag");
       };
       window.addEventListener("mousemove", onMove, true);

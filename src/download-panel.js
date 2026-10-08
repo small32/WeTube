@@ -205,14 +205,22 @@
     } catch (e) { return true; }
   }
 
-  /* 进行中的任务数（running / probing）。
+  /* 进行中的任务数。
    * 注意别用 tasks.size 判断有没有活干：完成/失败的卡片会一直留在 tasks 里
    * （只有 started 事件会把临时的 queued 卡迁移掉），tasks.size 只增不减，
-   * 一旦探测过就永远 >0，悬浮球再也不会在非视频页隐藏。 */
+   * 一旦探测过就永远 >0，悬浮球再也不会在非视频页隐藏。
+   *
+   * 状态的完整生命周期：probing → ready → queued → running → done/failed，
+   * 前四个都是"还有活"。以前只数 running/probing，漏了 queued：
+   * Rust 侧并发闸门是 2，第 3 个任务起就是真排队，漏算会有两个可见后果——
+   *   · 角标少算（显示 2，实际 3 个在等）；
+   *   · 先跑的 2 个完成、排队者还没收到 started 的那一瞬计数归零，悬浮球闪一下。
+   * ready 也补上：那是"探测完了、等用户点下载"的卡片，同样不该让球消失。 */
+  const ACTIVE_STATES = new Set(["probing", "ready", "queued", "running"]);
   function activeTaskCount() {
     let n = 0;
     for (const t of tasks.values()) {
-      if (t.state === "running" || t.state === "probing") n += 1;
+      if (ACTIVE_STATES.has(t.state)) n += 1;
     }
     return n;
   }
@@ -372,6 +380,9 @@
 
   function makeCard(key, titleText) {
     const body = ensureEmpty();
+    // 面板被移除（或从未注入）时 body 是 null。以前直接 body.prepend 会抛
+    // TypeError；返回 null 让调用方自己决定怎么处理。
+    if (!body) return null;
     const card = document.createElement("div");
     card.className = "dl-task";
 
@@ -487,6 +498,7 @@
       case "probe-start": {
         const key = `probe:${++seq}`;
         const card = makeCard(key, "");
+        if (!card) break;
         card.url = event.url;
         card.left.textContent = "探测中…";
         card._probeKey = key;
@@ -532,6 +544,7 @@
         {
           const key = entry3?.[0] || `task:${event.id}`;
           const t = entry3?.[1] || makeCard(key, event.title || event.url);
+          if (!t) break;
           if (entry3) tasks.delete(key);
           t.id = event.id;
           t.url = event.url;
@@ -585,8 +598,46 @@
         break;
       }
       case "fail": {
-        const t = tasks.get(`task:${event.id}`) || (event.id === 0 ? [...tasks.values()].find((t) => t.state === "queued" && t.requestId === event.requestId) : null);
-        if (!t) break;
+        // 先按真实 id 找；找不到再按 requestId 兜底。
+        //
+        // 兜底这里**不能**再限制 `event.id === 0`：排队路径下任务可能在发出
+        // `started` 之前就失败（槽位满了搬后台，run_job 在 spawn 前挂掉），
+        // 事件里带的是真实 id，但前端从来没建过 `task:<id>` 卡片，只能靠
+        // requestId 找到那张仍处于"排队中"的卡。限制成 id===0 会把这条事件
+        // 静默丢掉，卡片永久卡在「排队中…」且不显示取消按钮。
+        const t =
+          tasks.get(`task:${event.id}`) ||
+          (event.requestId
+            ? [...tasks.values()].find(
+                (c) =>
+                  c.state !== "done" &&
+                  c.state !== "failed" &&
+                  c.requestId === event.requestId,
+              )
+            : null);
+        if (!t) {
+          // 兜底：这条失败事件连卡片都没有（页面重载后重放历史、而该任务
+          // 在发出 `started` 之前就失败了）。把它显式渲染出来，否则用户
+          // 完全看不到失败原因，只看到"下载没了"。
+          // key 用 requestId 派生，重复重放快照不会叠出多张卡。
+          if (event.id === 0 && event.detail && event.requestId) {
+            const key = `fail:${event.requestId}`;
+            if (!tasks.has(key)) {
+              const card = makeCard(key, "下载失败");
+              if (card) {
+                card.state = "failed";
+                card.left.textContent = "失败";
+                const err = document.createElement("div");
+                err.className = "t-err";
+                err.textContent = event.detail;
+                card.el.appendChild(err);
+                pruneFinished();
+                window.__wetubeDlRefreshBadge?.();
+              }
+            }
+          }
+          break;
+        }
         // 终态守卫：仅忽略终态，允许覆盖 cancelled 中间状态
         if (t.state === "done" || t.state === "failed") break;
         // 取消与否看布尔字段，不靠中文文案比对——改文案或做 i18n 时

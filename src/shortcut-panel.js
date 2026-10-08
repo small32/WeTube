@@ -30,6 +30,14 @@
 	let backdrop = null;
 	/** 正在等用户按键的条目 id，null 表示没在捕获。 */
 	let capturingId = null;
+	/**
+	 * 已提交、还没等到 Rust 回话的那次改动。
+	 *
+	 * 面板是单向数据流：真正保存成功与否只有 Rust 说了算（它有一套自己的键码
+	 * 解析表，`PrintScreen` / `AudioVolumeUp` 这类它不认识的键会被拒）。所以
+	 * 这里不能一提交就写"已保存"，只能记下待确认，等权威注册表回来再定稿。
+	 */
+	let pendingEdit = null;
 
 	const send = (payload) => {
 		try {
@@ -200,10 +208,14 @@
 		const id = capturingId;
 		stopCapture();
 
-		// 冲突只提示，不强拦——用户可能就是想这么设
+		// 冲突只提示，不强拦——用户可能就是想这么设。
+		// 但**不能**在这里就说"已保存"：Rust 侧还有一道键码白名单（muda 的解析
+		// 表），它不认识的键会被拒。所以这里只说"已提交"，结果由
+		// __wetubeOnShortcutsChanged（成功）或 __wetubeOnShortcutRejected（被拒）定稿。
 		const clash = findConflict(spec, id);
+		pendingEdit = { id, spec };
 		showNote(
-			clash ? `与「${clash.label}」冲突了，仍然按你的设置保存` : "已保存",
+			clash ? `与「${clash.label}」冲突了，已提交` : "已提交",
 			Boolean(clash)
 		);
 		send({ type: "shortcut:set", id, spec });
@@ -349,6 +361,31 @@
 			window.__WETUBE_SHORTCUTS__ = next;
 		}
 		window.dispatchEvent(new CustomEvent("wetube:shortcuts-changed"));
+		if (document.getElementById(PANEL_ID)) render();
+		// 权威值回来了：确认这次改动真的落盘了再写"已保存"。
+		// （render 只清 .sc-body，noteNode 是它的兄弟节点，不会被重绘冲掉，
+		//   但还是先重绘再写提示，免得以后有人把提示挪进 body。）
+		if (pendingEdit) {
+			const saved =
+				Array.isArray(registry) &&
+				registry.find((it) => it.id === pendingEdit.id)?.spec === pendingEdit.spec;
+			if (saved) showNote("已保存", false);
+			pendingEdit = null;
+		}
+	};
+
+	/**
+	 * Rust 拒了这次改动（键码不在它的解析表里，或落盘失败）。
+	 *
+	 * 注册表本来就没变，重绘一下面板就回到旧值；再把提示换成一句人话，
+	 * 免得用户对着"已提交"以为设置成功了。
+	 */
+	window.__wetubeOnShortcutRejected = (info) => {
+		pendingEdit = null;
+		const item = registry.find((it) => it.id === info?.id) || null;
+		const what = info?.spec ? `「${info.spec}」` : "这个按键";
+		const tail = item ? `，「${item.label}」保持原值` : "";
+		showNote(`${what}${info?.reason || "不被支持"}${tail}`, true);
 		if (document.getElementById(PANEL_ID)) render();
 	};
 })();

@@ -81,7 +81,11 @@
 		// `pages: ["live"]` 的功能经 LIVE_ALIAS 映射后要的就是 "watch"，
 		// 结果这类功能在直播间永远不生效。直播按 watch 页处理（与下面
 		// LIVE_ALIAS 的语义一致），是不是真直播由功能自己判断。
-		if (pathname.startsWith("/live")) return "watch";
+		//
+		// 必须写成 `=== "/live" || startsWith("/live/")`：裸 startsWith 会把
+		// `/live_chat`、`/live_chat_replay` 也算成 watch，而这些页面没有播放器，
+		// 依赖播放器的功能会白等 10 秒超时。
+		if (pathname === "/live" || pathname.startsWith("/live/")) return "watch";
 		if (pathname.startsWith("/watch")) return "watch";
 		if (pathname.startsWith("/shorts")) return "shorts";
 		if (pathname.startsWith("/results")) return "search";

@@ -1,5 +1,9 @@
-// WETUBE_BOOTSTRAP_FIXTURE=/tmp/bootstrap.js cargo test bootstrap_fixture
-// node scripts/verify-bootstrap.js /tmp/bootstrap.js (requires jsdom)
+// init_script 注入内容的回归测试。两步：
+//   1) 先生成 fixture（**环境变量**只是给 cargo test 判断"该往外写文件了"）：
+//        WETUBE_BOOTSTRAP_FIXTURE=/tmp/bootstrap.js cargo test bootstrap_fixture
+//   2) 再跑这个脚本，fixture 路径是**命令行参数**，不是环境变量：
+//        node scripts/verify-bootstrap.js /tmp/bootstrap.js   （需要 jsdom）
+// 注意它不在 `npm run verify` 链里——因为依赖第 1 步的 cargo test 先跑完。
 const fs = require('node:fs');
 const assert = require('node:assert/strict');
 const { JSDOM } = require('jsdom');

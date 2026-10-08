@@ -1,0 +1,63 @@
+name: CI
+
+# 每次推到 main / 提 PR 都跑一遍完整回归。
+#
+# 存在的理由：release.yml 只做「打 tag → 构建 → 发布」，不跑任何测试，
+# 于是「能编译」就等于「能发布」——任何不破坏编译的功能回归都会直接进 Release
+# （v3.0.7 就是带着两个 P1 回归发出去的）。这个工作流把测试挪到合入前拦住。
+on:
+  push:
+    branches: ['main']
+  pull_request:
+  workflow_dispatch:
+
+# 只读：这个工作流不需要写任何东西。
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # 与 release.yml 保持一致：不在 CI 里自动追 yt-dlp 最新版，保证结果可复现。
+  YTDLP_AUTO_UPDATE: '0'
+
+jobs:
+  rust:
+    name: Rust 测试
+    # 跑在 Windows 上：内嵌工具（yt-dlp/ffmpeg/qjs）只在 Windows 目标里打包，
+    # 解压 + 实际执行这三条测试也只在 Windows 上有意义（其它平台构建出来的是空载荷）。
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # vendor/*.xz 是 Git LFS 托管的内嵌工具载荷；不拉真实内容的话，
+          # 依赖它们的测试会走"未内嵌"分支直接跳过，等于没测。
+          lfs: true
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: '. -> target'
+
+      # --locked：Cargo.lock 已入库，锁文件被静默改写要能被发现。
+      - name: cargo test
+        run: cargo test --locked -j 2
+
+  js:
+    name: 前端回归（jsdom）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # ubuntu runner 自带 node/npm，不必额外 setup-node。
+      - name: 打印工具链版本
+        run: node --version && npm --version
+
+      # npm ci 走 package-lock.json，保证与本地一致的 jsdom 版本。
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 跑 scripts/verify-*.js
+        run: npm run verify

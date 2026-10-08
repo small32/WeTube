@@ -50,12 +50,21 @@ async function main() {
     positionOverlay() {}, updateButton() {}, renderCurrentCue() {},
   };
   vm.runInNewContext(extract('function subtitleRequestId(', '/** Rust 收到批量消息'), ctx);
-  vm.runInNewContext(extract('async function startEngine()', '\n\t/**\n\t * SPA 切视频'), ctx);
+  // E16 起 startEngine 拆成两层：外层只负责"同一次导航只启动一次"的去重，
+  // 真正干活的是 startEngineInner。这里从 `let engineStart` 那行开始取，
+  // 两层都在切片里，测的就是页面上的真实调用路径。
+  vm.runInNewContext(extract('let engineStart = null;', '\n\t/**\n\t * SPA 切视频'), ctx);
   const loaded = (id) => ({videoId: id, hash: id, cues: [{text: id}]});
   const first = ctx.startEngine(); await flush();
   ctx.location.href = 'https://www.youtube.com/watch?v=B';
   const second = ctx.startEngine(); await flush();
   assert.equal(pending[0].signal.aborted, true);
+  // E16：同一次导航里会有多个触发源（yt-navigate-finish / yt-page-data-updated /
+  // runtime force 的 enable）先后调进来。同一 href 的重复调用必须复用在途的那一份，
+  // 否则第二遍的 stopEngine() 会把第一遍在途的抓轨整个 abort 掉，白抓一遍再重抓一遍。
+  const duplicate = ctx.startEngine(); await flush();
+  assert.equal(duplicate, second, '同一 href 的重复启动应复用同一个 Promise');
+  assert.equal(pending.length, 2, '重复启动不应再发起一次抓轨');
   pending[1].resolve(loaded('B')); assert.equal(await second, true);
   pending[0].resolve(loaded('A')); assert.equal(await first, false);
   assert.equal(state.cueVideoId, 'B');

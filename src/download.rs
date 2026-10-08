@@ -26,7 +26,25 @@ mod bundled {
 }
 
 /// 内嵌工具解出后的目录缓存，避免每次取路径都碰文件系统。
-static EMBEDDED_TOOLS: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
+///
+/// **只缓存成功**。以前这里是个 `OnceLock<Option<PathBuf>>`，把「一次解压失败」
+/// 也当成结果永久钉住：任意一次瞬时错误（磁盘临时满、杀软锁住 `.tmp`、
+/// 写入中断）都会让 `yt_dlp_path()` 之后一律退回外部查找，在没有外部 yt-dlp
+/// 的机器上表现为「下载功能整个不可用」，只能重启 App 才好。
+/// 现在失败不写缓存，下次调用会重试。
+static EMBEDDED_TOOLS: std::sync::LazyLock<Mutex<Option<std::path::PathBuf>>> =
+    std::sync::LazyLock::new(|| Mutex::new(None));
+
+/// 本次构建到底有没有内嵌工具。这是编译期常量（`bytes.is_empty()`），
+/// 判定一次即可；用来区分「本来就没内嵌」（别白试了）和「内嵌了但这次失败了」（要重试）。
+fn embedded_build_has_tools() -> bool {
+    static CACHED: OnceLock<bool> = OnceLock::new();
+    *CACHED.get_or_init(|| {
+        !bundled::YTDLP_BYTES.is_empty()
+            || !bundled::FFMPEG_BYTES.is_empty()
+            || !bundled::DENO_BYTES.is_empty()
+    })
+}
 
 /// 工具可执行文件名，必须是**规范名**（`ffmpeg.exe` / `ffmpeg` / `yt-dlp.exe`）。
 ///
@@ -83,7 +101,14 @@ fn extract_tool(
         return Ok(target);
     }
 
-    let tmp = target.with_extension("tmp");
+    // 临时文件名带 pid：两个 App 实例同时首次启动时不能落到同一个
+    // `ffmpeg.tmp` 上——否则一方的 `File::create` 会截断另一方正在写的内容，
+    // 两边都拿不到完整文件（最后双双失败，退化成"没有内嵌工具可用"）。
+    let tmp = dir.join(format!(
+        "{}.{}.tmp",
+        tool_file_name(stem),
+        std::process::id()
+    ));
     {
         let mut out = std::fs::File::create(&tmp)?;
         if packed {
@@ -134,42 +159,56 @@ fn prune_other_copies(dir: &std::path::Path, stem: &str, keep: &std::path::Path)
 /// 解出全部内嵌工具，返回它们所在的目录。都没内嵌（非 Windows 构建，
 /// 或没跑过 fetch 脚本）时返回 None，调用方退回外部查找。
 fn embedded_tools_dir() -> Option<std::path::PathBuf> {
-    EMBEDDED_TOOLS
-        .get_or_init(|| {
-            let dir = embedded_dir()?;
-            let mut ready = false;
-            let tools = [
-                (
-                    "yt-dlp",
-                    bundled::YTDLP_BYTES,
-                    bundled::YTDLP_PACKED,
-                    bundled::YTDLP_SIZE,
-                ),
-                (
-                    "ffmpeg",
-                    bundled::FFMPEG_BYTES,
-                    bundled::FFMPEG_PACKED,
-                    bundled::FFMPEG_SIZE,
-                ),
-                (
-                    "qjs",
-                    bundled::DENO_BYTES,
-                    bundled::DENO_PACKED,
-                    bundled::DENO_SIZE,
-                ),
-            ];
-            for (stem, bytes, packed, size) in tools {
-                if bytes.is_empty() {
-                    continue;
-                }
-                match extract_tool(&dir, stem, bytes, packed, size) {
-                    Ok(_) => ready = true,
-                    Err(err) => log(&format!("解出内嵌 {stem} 失败：{err}")),
-                }
-            }
-            ready.then_some(dir)
-        })
-        .clone()
+    // 本次构建压根没内嵌：直接返回，别每次都去 create_dir_all + 查元数据。
+    if !embedded_build_has_tools() {
+        return None;
+    }
+    // 之前成功过就直接复用。
+    if let Ok(guard) = EMBEDDED_TOOLS.lock() {
+        if let Some(dir) = guard.as_ref() {
+            return Some(dir.clone());
+        }
+    }
+
+    let dir = embedded_dir()?;
+    let tools = [
+        (
+            "yt-dlp",
+            bundled::YTDLP_BYTES,
+            bundled::YTDLP_PACKED,
+            bundled::YTDLP_SIZE,
+        ),
+        (
+            "ffmpeg",
+            bundled::FFMPEG_BYTES,
+            bundled::FFMPEG_PACKED,
+            bundled::FFMPEG_SIZE,
+        ),
+        (
+            "qjs",
+            bundled::DENO_BYTES,
+            bundled::DENO_PACKED,
+            bundled::DENO_SIZE,
+        ),
+    ];
+    let mut ready = false;
+    for (stem, bytes, packed, size) in tools {
+        if bytes.is_empty() {
+            continue;
+        }
+        match extract_tool(&dir, stem, bytes, packed, size) {
+            Ok(_) => ready = true,
+            // 失败**不缓存**（见 EMBEDDED_TOOLS 的注释），下次调用会重试。
+            Err(err) => log(&format!("解出内嵌 {stem} 失败：{err}")),
+        }
+    }
+    if !ready {
+        return None;
+    }
+    if let Ok(mut guard) = EMBEDDED_TOOLS.lock() {
+        *guard = Some(dir.clone());
+    }
+    Some(dir)
 }
 
 /// 内嵌 yt-dlp 的可执行路径（解出一次后缓存）。解不出来就返回 None，
@@ -396,29 +435,64 @@ static JOB_GATE: std::sync::LazyLock<JobGate> = std::sync::LazyLock::new(|| JobG
     changed: std::sync::Condvar::new(),
 });
 
-/// 试着占一个槽位，占不到返回 false（调用方据此决定要不要排队）。
-fn try_acquire_slot() -> bool {
-    let Ok(mut running) = JOB_GATE.running.lock() else { return false; };
-    if *running >= MAX_CONCURRENT_JOBS {
-        return false;
-    }
-    *running += 1;
-    true
-}
+/// 退出中标志：`kill_all()` 之后置位。
+///
+/// 排队线程被 `release_slot()` 唤醒后据此**不再** spawn 新进程——否则它会在
+/// 事件循环已经销毁之后起一个没人负责 kill 的 yt-dlp（真正的孤儿进程，
+/// 一直下到自然结束）。
+static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
 
-/// 阻塞等一个槽位。只在后台排队线程里用，主线程不能调。
-fn acquire_slot() {
-    let Ok(mut running) = JOB_GATE.running.lock() else { return; };
-    while *running >= MAX_CONCURRENT_JOBS {
-        match JOB_GATE.changed.wait(running) {
-            Ok(guard) => running = guard,
-            Err(poisoned) => {
-                running = poisoned.into_inner();
-                break;
+/// 占着并发槽位的凭证。**RAII**：`Drop` 时自动归还。
+///
+/// 以前槽位只有读取线程里显式的 `release_slot()` 一条归还路径，线程里任何
+/// panic（回调 panic 等）都会越过它。泄漏满 `MAX_CONCURRENT_JOBS` 个之后
+/// 占位永远失败，**所有后续下载永久排队**直到重启。
+/// 交给 `Drop` 之后，panic 展开时也会归还。
+struct SlotGuard;
+
+impl SlotGuard {
+    /// 试着占一个槽位，满了返回 None（调用方据此决定要不要排队）。
+    fn try_acquire() -> Option<Self> {
+        if SHUTTING_DOWN.load(Ordering::SeqCst) {
+            return None;
+        }
+        let Ok(mut running) = JOB_GATE.running.lock() else { return None; };
+        if *running >= MAX_CONCURRENT_JOBS {
+            return None;
+        }
+        *running += 1;
+        Some(SlotGuard)
+    }
+
+    /// 阻塞等一个槽位。只在后台排队线程里用，主线程不能调。
+    ///
+    /// 返回 None 表示 App 正在退出，调用方不要再起进程。
+    fn acquire() -> Option<Self> {
+        let mut running = JOB_GATE.running.lock().ok()?;
+        while *running >= MAX_CONCURRENT_JOBS {
+            if SHUTTING_DOWN.load(Ordering::SeqCst) {
+                return None;
+            }
+            match JOB_GATE.changed.wait(running) {
+                Ok(guard) => running = guard,
+                Err(poisoned) => {
+                    running = poisoned.into_inner();
+                    break;
+                }
             }
         }
+        if SHUTTING_DOWN.load(Ordering::SeqCst) {
+            return None;
+        }
+        *running += 1;
+        Some(SlotGuard)
     }
-    *running += 1;
+}
+
+impl Drop for SlotGuard {
+    fn drop(&mut self) {
+        release_slot();
+    }
 }
 
 /// 归还槽位并唤醒一个排队中的任务。
@@ -469,6 +543,17 @@ impl EventHistory {
                     if events.last().is_some_and(|e| e["kind"] == "done" || e["kind"] == "fail") { return; }
                     events.truncate(1);
                     events.push(event.clone());
+                } else {
+                    // 没有对应的 `started`：`id: 0` 的失败事件（IPC 缺参、
+                    // spawn 同步失败、排队任务在 started 之前挂掉）**永远**
+                    // 不会有 started（started 只在进程真的起来之后才发，id 恒 ≥ 1）。
+                    //
+                    // 以前这里只 `get_mut`，取不到就丢掉——配合 history_key()
+                    // 给 id==0 派生的高位键，等于"派生了键但从不写历史"，
+                    // 页面重载后这些失败卡片直接消失。现在给它建一条独立条目
+                    // 并纳入裁剪顺序，前端重载时至少能把失败原因显示出来。
+                    self.order.push(id);
+                    self.tasks.insert(id, vec![event.clone()]);
                 }
             }
             _ => return,
@@ -569,6 +654,10 @@ pub fn cancel(id: u32) -> bool {
 /// 残留的 yt-dlp 会把当前任务下完自然退出，不会永久驻留；.part 续传
 /// 机制保证下次下载同一视频时接着传，不算数据损坏。
 pub fn kill_all() {
+    // 先置退出标志并唤醒所有排队线程：它们醒来后不会再 spawn 新进程，
+    // 否则会在事件循环销毁之后留下没人负责的孤儿 yt-dlp。
+    SHUTTING_DOWN.store(true, Ordering::SeqCst);
+    JOB_GATE.changed.notify_all();
     // 同样先把条目搬出来再逐个 kill：terminate_tree 在 Windows 上会同步跑
     // taskkill 并等它退出，这期间不该占着进程表的锁。
     let tasks: Vec<_> = {
@@ -593,24 +682,37 @@ pub fn kill_all() {
 
 /// SIGTERM 路径的尽力清理：拿不到锁（主线程正持锁的窄窗口）就放弃，
 /// 交给调用方直接退进程。只在信号处理器里用——那里不能阻塞等锁。
+///
+/// 这里**只允许 try_lock**。原来内层用的是阻塞的 `arc.lock()`，一旦信号恰好
+/// 落在某个下载线程持有该 TaskHandle 的窗口里，处理器就会永远卡在那里，
+/// SIGTERM 等于被吞掉（用户 `kill` 之后进程不退出，只能 -9）。同理不用
+/// `map.drain()`：Drain 迭代器析构时会 drop 掉每个 `Arc<Mutex<TaskHandle>>`
+/// （free 堆内存、drop Child），这些析构都不是异步信号安全的。改成只读遍历，
+/// 把处理器里的动作压到最小：`libc::kill(-pgid, SIGKILL)` + `_exit`。
 #[cfg(unix)]
 pub fn kill_all_best_effort() {
-    if let Ok(mut map) = CHILDREN.try_lock() {
-        for (_, arc) in map.drain() {
-            if let Ok(mut handle) = arc.lock() {
-                let process_group = handle.process_group;
-                if let Some(ref mut c) = handle.child {
-                    let _ = terminate_tree(c, process_group);
-                }
-            }
+    let Ok(map) = CHILDREN.try_lock() else {
+        return;
+    };
+    for arc in map.values() {
+        let Ok(mut handle) = arc.try_lock() else {
+            continue;
+        };
+        let process_group = handle.process_group;
+        if let Some(ref mut child) = handle.child {
+            let _ = terminate_tree(child, process_group);
         }
     }
 }
 
-/// download 模块内部用的轻量日志：不依赖 main.rs 的 log_err（避免循环引用），
-/// 直接走 stderr——App 退出路径上多这一行没副作用。
+/// download 模块内部用的轻量日志。
+///
+/// **不能直接 `eprintln!`**：Windows release 是无控制台的 GUI 程序，stderr
+/// 写入会失败，而 `eprintln!` 在写失败时 panic（panic 发生在下载/退出路径上，
+/// 直接带崩进程）。统一交给 main.rs 的 `log_err`——它先落盘再尝试写 stderr，
+/// 两边失败都不会 panic。
 fn log(message: &str) {
-    eprintln!("[WeTube] {message}");
+    crate::log_err(message);
 }
 
 /// 下载链路的落盘日志（`%TEMP%\WeTube-download.log`）。
@@ -724,6 +826,65 @@ fn with_utf8_output(cmd: &mut Command) {
     cmd.arg("--encoding").arg("utf-8");
 }
 
+/// 探测的超时上限。
+///
+/// `Command::output()` 自带的等待**没有超时**：网络黑洞 / 代理挂死时 yt-dlp
+/// 会一直挂着，页面上的「探测中…」卡片就永久停在那里（而且探测卡没有取消按钮）。
+/// 超过这个时间直接连进程树一起杀掉，报一条可读的错误。
+const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+
+/// 跑一个子进程并强制超时，行为等价于 `Command::output()` 但多一层时限。
+///
+/// stdout / stderr 各由一个线程排空（否则大输出会把管道写满、父子互相等死锁），
+/// 主线程只负责轮询 `try_wait` + 看门狗计时。
+fn output_with_timeout(
+    cmd: &mut Command,
+    timeout: std::time::Duration,
+) -> Result<std::process::Output, String> {
+    let mut child = cmd
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| format!("启动 yt-dlp 失败：{err}"))?;
+
+    let stdout = child.stdout.take().expect("stdout 已 piped");
+    let stderr = child.stderr.take().expect("stderr 已 piped");
+    let stdout_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = std::io::Read::read_to_end(&mut { stdout }, &mut buf);
+        buf
+    });
+    let stderr_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = std::io::Read::read_to_end(&mut { stderr }, &mut buf);
+        buf
+    });
+
+    let deadline = std::time::Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    // 进程组没设（探测没走 process_group(0)），传 false
+                    // 让 unix 分支走 child.kill()，避免误杀别的进程组。
+                    let _ = terminate_tree(&mut child, false);
+                    let _ = child.wait();
+                    return Err(format!("探测超时（超过 {} 秒未返回）", timeout.as_secs()));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(err) => return Err(format!("等待 yt-dlp 失败：{err}")),
+        }
+    };
+
+    Ok(std::process::Output {
+        status,
+        stdout: stdout_reader.join().unwrap_or_default(),
+        stderr: stderr_reader.join().unwrap_or_default(),
+    })
+}
+
 /// 探测视频信息（阻塞，跑在后台线程）。成功时返回可直接发给页面的摘要 JSON。
 pub fn probe(url: &str, cookies: &CookieSource) -> Result<Value, String> {
     let ytdlp = yt_dlp_path().ok_or("未找到 yt-dlp（App 包损坏或未安装）")?;
@@ -739,11 +900,7 @@ pub fn probe(url: &str, cookies: &CookieSource) -> Result<Value, String> {
     // 跟 start() 一致，用 `--` 把 URL 和选项隔开：否则以 `-` 开头的输入
     // （`--version`、`-o xxx`）会被 argparse 当成选项，探测行为被改写。
     cmd.arg("--").arg(url);
-    let output = cmd
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|err| format!("启动 yt-dlp 失败：{err}"))?;
+    let output = output_with_timeout(&mut cmd, PROBE_TIMEOUT)?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -991,7 +1148,12 @@ impl ProgressAggregator {
             return progress;
         }
         // 总量未知（NA）时 yt-dlp 自己那串百分比就是唯一可用信息，原样透传。
-        if overall_total == 0 {
+        //
+        // 判定必须看**当前这条流**的 total，不能看 overall_total：
+        // 合并下载时第一条流下完之后 base_bytes 就 > 0 了，第二条流的 total
+        // 是 NA(=0) → overall_total 仍等于 base_bytes > 0，"未知"根本判不出来，
+        // 于是 pct = (base + downloaded) / base 恒 ≥ 100%，整条第二流被钉在 100%。
+        if total == 0 {
             return progress;
         }
         let overall_downloaded = self.base_bytes.saturating_add(downloaded);
@@ -1036,24 +1198,29 @@ pub fn start(
     // 并发闸门：同时最多跑 MAX_CONCURRENT_JOBS 个 yt-dlp。
     // 槽位还有就照旧在主线程起进程（失败能同步返回）；槽位满了才整包
     // 搬到后台线程排队——页面显示的「排队中」到这时才是真的在排队。
-    if try_acquire_slot() {
-        if let Err(err) = run_job(
+    //
+    // 槽位现在是 RAII 的 `SlotGuard`：交给 run_job 一路带进读取线程，
+    // 下载结束/线程 panic 时由 Drop 归还，不再依赖任何一处显式的 release_slot。
+    if let Some(slot) = SlotGuard::try_acquire() {
+        run_job(
             id,
             job,
             Arc::clone(&on_started),
             Arc::clone(&on_event),
             Arc::clone(&done),
             Arc::clone(&on_cancelled),
-        ) {
-            release_slot();
-            return Err(err);
-        }
+            slot,
+        )?;
         return Ok(id);
     }
     std::thread::spawn(move || {
-        acquire_slot();
-        if let Err(err) = run_job(id, job, on_started, on_event, Arc::clone(&done), on_cancelled) {
-            release_slot();
+        let Some(slot) = SlotGuard::acquire() else {
+            // App 正在退出：不要在这个时间点再起一个没人负责 kill 的 yt-dlp。
+            call_done(&done, id, false, Some("App 正在退出，任务已取消".to_string()));
+            return;
+        };
+        if let Err(err) = run_job(id, job, on_started, on_event, Arc::clone(&done), on_cancelled, slot)
+        {
             call_done(&done, id, false, Some(err));
         }
     });
@@ -1107,6 +1274,9 @@ fn run_job(
     on_event: ProgressCb,
     done: DoneCb,
     on_cancelled: CancelCb,
+    // 并发槽位凭证。成功起进程后会被搬进读取线程，下载结束（或线程 panic）
+    // 时由 Drop 归还——这是唯一的归还路径。
+    slot: SlotGuard,
 ) -> Result<(), String> {
     let OwnedJob { url, mode, format_id, has_audio, out_dir, concurrent, cookies } = job;
     let ytdlp = yt_dlp_path().ok_or("未找到 yt-dlp（App 包损坏或未安装）")?;
@@ -1210,7 +1380,13 @@ fn run_job(
 
     // 读 stdout：进度行 + 最终文件路径行
     std::thread::spawn(move || {
+        // 持有并发槽位直到线程结束（含 panic 展开）。这是唯一的归还路径。
+        let _slot = slot;
         let mut final_path: Option<String> = None;
+        // 本次下载出现过的所有 `[download] Destination:` 路径。用来在取消/失败时
+        // 清理 `.part` / `.ytdl`——合并下载的中间文件（xxx.f137.mp4.part）也算在内，
+        // 只看最终路径是清不到它们的。
+        let mut destinations: Vec<String> = Vec::new();
         let mut aggregator = ProgressAggregator::default();
         for line in lines_lossy(stdout) {
             if let Some(event) = parse_progress_line(&line) {
@@ -1228,12 +1404,16 @@ fn run_job(
                 }
             } else if let Some(path) = line.strip_prefix("[ExtractAudio] Destination: ") {
                 final_path = Some(path.trim().to_string());
-            } else if line.starts_with("[download] Destination:") {
+            } else if let Some(p) = line.strip_prefix("[download] Destination: ") {
+                let p = p.trim().to_string();
+                if !destinations.contains(&p) {
+                    // 登记占用：并发上限是 2，两个任务下同一档位时会指向同一个
+                    // 输出名，谁先被取消谁就能把对方正在写的 `.part` 删掉。
+                    register_output(&p);
+                    destinations.push(p.clone());
+                }
                 if final_path.is_none() {
-                    final_path = line
-                        .strip_prefix("[download] Destination: ")
-                        .map(str::trim)
-                        .map(str::to_string);
+                    final_path = Some(p);
                 }
             } else if line.starts_with("[download] ") && line.contains(" has already been downloaded") {
                 // "[download] xxx.mp4 has already been downloaded"
@@ -1252,7 +1432,6 @@ fn run_job(
         let arc = match CHILDREN.lock().ok().and_then(|mut map| map.remove(&id)) {
             Some(a) => a,
             None => {
-                release_slot();
                 call_done(&done, id, false, Some("进程表状态异常".to_string()));
                 return;
             }
@@ -1273,7 +1452,6 @@ fn run_job(
             let mut handle = match arc.lock() {
                 Ok(h) => h,
                 Err(_) => {
-                    release_slot();
                     call_done(&done, id, false, Some("进程表损坏".to_string()));
                     return;
                 }
@@ -1299,20 +1477,41 @@ fn run_job(
             }
         };
         // 任务到这里就退出闸门了，排队中的下一个可以开始。
-        release_slot();
-        let final_path_for_cleanup = final_path.clone();
+        // 显式提前归还（不等作用域结束），后面的 cleanup 是文件操作，没必要占着槽位。
+        // 若这行之前发生 panic，`_slot` 仍会在展开时由 Drop 归还。
+        drop(_slot);
+
+        // 先释放本任务对输出路径的占用，再挑出**没有别的任务在用**的那些去清理。
+        // 并发上限是 2：两个任务下同一个视频/同一档位时会指向同一个输出名，
+        // 一个被取消就把另一个正在写的 `.part` 删掉，对方的续传数据凭空消失。
+        for path in &destinations {
+            unregister_output(path);
+        }
+        let mut cleanup_targets: Vec<String> = destinations
+            .iter()
+            .filter(|path| !output_in_use(path))
+            .cloned()
+            .collect();
+        // 最终产物路径不一定来自 Destination 行（也可能是 Merger / ExtractAudio /
+        // WTPATH），一并纳入候选，去重后交给 cleanup_partials。
+        if let Some(path) = final_path.as_deref() {
+            if !output_in_use(path) && !cleanup_targets.iter().any(|p| p == path) {
+                cleanup_targets.push(path.to_string());
+            }
+        }
+
         match result {
             Ok(true) => call_done(&done, id, true, final_path),
             Ok(false) => {
                 // 取消/失败都清一次半截文件：.part 靠 yt-dlp 续传能救回来，
                 // 但用户手动删任务的语义是"别留下垃圾"。
-                cleanup_partials(final_path_for_cleanup.as_deref());
+                cleanup_partials(&cleanup_targets);
                 if let Ok(cb) = on_cancelled.lock() {
                     cb(id);
                 }
             }
             Err(detail) => {
-                cleanup_partials(final_path_for_cleanup.as_deref());
+                cleanup_partials(&cleanup_targets);
                 call_done(&done, id, false, Some(detail));
             }
         }
@@ -1321,20 +1520,62 @@ fn run_job(
     Ok(())
 }
 
+/// 正在被某个下载任务使用的输出路径 → 引用计数。
+///
+/// `cleanup_partials` 只按输出名删 `.part`，而并发上限是 2：两个任务下同一个
+/// 视频的同一档位时会指向同一个输出名，一个被取消就删掉另一个正在写的
+/// `.part`，对方的续传数据凭空消失。这里登记占用，清理时跳过还有人在用的路径。
+static ACTIVE_OUTPUTS: std::sync::LazyLock<Mutex<HashMap<String, usize>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// 登记一个正在写入的输出路径。
+fn register_output(path: &str) {
+    if path.is_empty() {
+        return;
+    }
+    if let Ok(mut map) = ACTIVE_OUTPUTS.lock() {
+        *map.entry(path.to_string()).or_insert(0) += 1;
+    }
+}
+
+/// 释放一次登记。
+fn unregister_output(path: &str) {
+    if let Ok(mut map) = ACTIVE_OUTPUTS.lock() {
+        if let Some(count) = map.get_mut(path) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                map.remove(path);
+            }
+        }
+    }
+}
+
+/// 这个输出路径是否还有任务在用。
+fn output_in_use(path: &str) -> bool {
+    ACTIVE_OUTPUTS
+        .lock()
+        .map(|map| map.get(path).is_some_and(|count| *count > 0))
+        .unwrap_or(false)
+}
+
 /// 清掉一次下载留下的半截文件。
 ///
-/// yt-dlp 下载中是 `xxx.mp4.part`（合并前还有 `.f137.mp4` 之类的分流文件），
+/// yt-dlp 下载中是 `xxx.mp4.part`（合并前还有 `xxx.f137.mp4` 之类的分流文件），
 /// 抽音频时是 `xxx.webm.ytdl`。取消或失败后它们会一直躺在下载目录里，
 /// 积少成多。只删这两个确切后缀，绝不碰已经落地的成品。
-fn cleanup_partials(final_path: Option<&str>) {
-    let Some(path) = final_path else { return; };
-    for suffix in [".part", ".ytdl"] {
-        let candidate = format!("{path}{suffix}");
-        if std::path::Path::new(&candidate).is_file() {
-            if let Err(err) = std::fs::remove_file(&candidate) {
-                download_log(&format!("清理半截文件失败 {candidate}: {err}"));
-            } else {
-                download_log(&format!("已清理半截文件 {candidate}"));
+///
+/// `paths` 应包含本次任务见过的**所有** Destination 路径（含中间分流文件），
+/// 调用方已经过滤掉还有别的任务在用的那些。
+fn cleanup_partials(paths: &[String]) {
+    for path in paths {
+        for suffix in [".part", ".ytdl"] {
+            let candidate = format!("{path}{suffix}");
+            if std::path::Path::new(&candidate).is_file() {
+                if let Err(err) = std::fs::remove_file(&candidate) {
+                    download_log(&format!("清理半截文件失败 {candidate}: {err}"));
+                } else {
+                    download_log(&format!("已清理半截文件 {candidate}"));
+                }
             }
         }
     }
@@ -1342,6 +1583,44 @@ fn cleanup_partials(final_path: Option<&str>) {
 
 fn parse_final_path(line: &str) -> Option<String> {
     serde_json::from_str::<String>(line.strip_prefix("WTPATH|")?).ok()
+}
+
+/// stderr 最多保留这么多字节（末尾）。
+///
+/// 以前整段无上限累积：yt-dlp 的信息行 + 重试日志在长下载/反复重试时能把
+/// stderr 堆到几十 MB 常驻内存，而实际用到的只有最后一条非空行
+/// （friendly_error）和前 1200 字符（落盘日志）。
+const STDERR_TAIL_LIMIT: usize = 64 * 1024;
+
+/// 把 stderr 缓冲裁到 [`STDERR_TAIL_LIMIT`] 以内：丢最前面的内容，保留尾部。
+///
+/// 优先按**整行**丢，这样留下的都是完整行；只有当最后一行本身超过上限时
+/// （yt-dlp 偶尔吐一条几十 KB 的单行）才退回按字符边界截尾——那种情况下
+/// "整行丢"会把缓冲直接清空，等于把报错信息全丢了。
+fn trim_stderr_tail(text: &mut String) {
+    if text.len() <= STDERR_TAIL_LIMIT {
+        return;
+    }
+    // want 是要留下的尾部长度对应的起点；boundary 取**字符边界**，
+    // 否则截断处可能切断多字节字符。
+    let want = text.len() - STDERR_TAIL_LIMIT;
+    let boundary = text
+        .char_indices()
+        .find(|(i, _)| *i >= want)
+        .map(|(i, _)| i)
+        .unwrap_or(text.len());
+    let keep = if boundary == 0 || text.as_bytes()[boundary - 1] == b'\n' {
+        // 正好落在行首，直接从这里开始留。
+        boundary
+    } else {
+        match text[boundary..].find('\n') {
+            // 后面还有完整行：跳到它的行首。注意判断 `+ 1 < len` 而不是 `<= len`：
+            // 等号那种情况下找到的换行就是当前这一行的结尾，跳过去等于清空。
+            Some(i) if boundary + i + 1 < text.len() => boundary + i + 1,
+            _ => boundary,
+        }
+    };
+    text.drain(..keep);
 }
 
 fn drain_stderr(reader: impl std::io::Read + Send + 'static) -> std::thread::JoinHandle<String> {
@@ -1352,6 +1631,7 @@ fn drain_stderr(reader: impl std::io::Read + Send + 'static) -> std::thread::Joi
         for line in lines_lossy(reader) {
             text.push_str(&line);
             text.push('\n');
+            trim_stderr_tail(&mut text);
         }
         text
     })
@@ -1415,6 +1695,44 @@ mod tests {
         assert!(cmd.get_envs().next().is_none(), "不应依赖环境变量");
     }
 
+    /// stderr 缓冲上限：留下的必须是**完整行**、长度必须在上限内、且绝不能清空。
+    ///
+    /// 最后一条是之前踩过的坑：yt-dlp 偶尔吐一条几十 KB 的**超长单行**（整段
+    /// 没有换行），而"优先按整行丢"的实现会把那唯一一行整个丢掉——缓冲归空，
+    /// friendly_error 与落盘日志里的报错原因全部消失，用户只看到"下载失败"。
+    #[test]
+    fn stderr_tail_keeps_whole_lines_and_never_empties() {
+        // ① 多行：留下的必须是完整行（行首对齐）
+        let mut text = String::new();
+        for i in 0..20_000 {
+            text.push_str(&format!("line {i}\n"));
+        }
+        assert!(text.len() > STDERR_TAIL_LIMIT);
+        trim_stderr_tail(&mut text);
+        assert!(text.len() <= STDERR_TAIL_LIMIT, "len={}", text.len());
+        assert!(text.starts_with("line "), "行首没对齐：{:?}", &text[..16]);
+        assert!(text.ends_with('\n'));
+        // 保留的是**尾部**（最后一行必须在）
+        assert!(text.contains("line 19999\n"));
+
+        // ② 超长单行：不能清空
+        let mut text = "x".repeat(STDERR_TAIL_LIMIT * 2);
+        trim_stderr_tail(&mut text);
+        assert!(!text.is_empty(), "超长单行被整段丢掉了");
+        assert!(text.len() <= STDERR_TAIL_LIMIT, "len={}", text.len());
+
+        // ③ 中文：截断不能落在字符中间
+        let mut text = "中".repeat(STDERR_TAIL_LIMIT);
+        trim_stderr_tail(&mut text);
+        assert!(text.len() <= STDERR_TAIL_LIMIT);
+        assert!(text.chars().all(|c| c == '中'), "截断切断了多字节字符");
+
+        // ④ 没超上限时不动
+        let mut text = String::from("short\n");
+        trim_stderr_tail(&mut text);
+        assert_eq!(text, "short\n");
+    }
+
     #[test]
     fn cancellation_fixture() {
         if std::env::var_os("WETUBE_PIPE_TEST_CHILD").is_some() {
@@ -1426,6 +1744,79 @@ mod tests {
         if std::env::var_os("WETUBE_CANCEL_TEST_CHILD").is_some() {
             std::thread::sleep(std::time::Duration::from_secs(30));
         }
+    }
+
+    /// 进度聚合：合并下载的第二条流**不能**被钉在 100%。
+    ///
+    /// 回归点：判定曾写成 `if overall_total == 0 { 透传 }`，而第一条流下完之后
+    /// `base_bytes > 0`，第二条流 total 是 NA(=0) 时 `overall_total` 仍 > 0，
+    /// 于是 `pct = (base + downloaded) / base` 恒 ≥ 100%。
+    #[test]
+    fn progress_aggregator_handles_multi_stream() {
+        // 单流：直接用整体比例
+        let mut agg = ProgressAggregator::default();
+        let out = agg.feed(serde_json::json!({
+            "percent": "50.0%", "downloaded": 500u64, "total": 1000u64
+        }));
+        assert_eq!(out["percent"], "50.0%");
+
+        // 第一条流下完 → 切到第二条流（从 0 重新开始）
+        let mut agg = ProgressAggregator::default();
+        let first = agg.feed(serde_json::json!({
+            "percent": "100.0%", "downloaded": 1_000_000u64, "total": 1_000_000u64
+        }));
+        assert_eq!(first["percent"], "100.0%");
+        let second = agg.feed(serde_json::json!({
+            "percent": "0.0%", "downloaded": 0u64, "total": 500_000u64
+        }));
+        assert_eq!(
+            second["percent"], "66.7%",
+            "换流后整体应是 1_000_000/1_500_000，不能还是 100%"
+        );
+        assert_eq!(second["downloaded"], 1_000_000u64);
+        assert_eq!(second["total"], 1_500_000u64);
+
+        // 第二条流总量 NA：算不出整体比例，原样透传（不能伪造成 100%）
+        let mut agg = ProgressAggregator::default();
+        agg.feed(serde_json::json!({
+            "percent": "100.0%", "downloaded": 1_000_000u64, "total": 1_000_000u64
+        }));
+        let na = agg.feed(serde_json::json!({
+            "percent": "3.2%", "downloaded": 10_000u64, "total": 0u64
+        }));
+        assert_eq!(na["percent"], "3.2%", "总量 NA 时应透传，不能钉在 100%");
+    }
+
+    /// `id: 0` 的失败事件（没有 started）也要进历史，页面重载后才看得到。
+    #[test]
+    fn history_keeps_id_zero_failures_by_request_id() {
+        let mut history = EventHistory::default();
+        let fail = serde_json::json!({
+            "kind": "fail", "id": 0, "requestId": "page:9", "detail": "缺少 url 或 mode 参数"
+        });
+        history.record(&fail);
+        assert_eq!(
+            history.snapshot(),
+            vec![fail.clone()],
+            "id==0 的失败不能因为没有 started 就被丢掉"
+        );
+        // 重复记录同一条不会叠出两份
+        history.record(&fail);
+        assert_eq!(history.snapshot().len(), 1);
+    }
+
+    /// 输出占用登记：还有别的任务在用同一个输出名时不能清理它的 `.part`。
+    #[test]
+    fn output_usage_registry_tracks_active_writers() {
+        let path = "C:\\tmp\\wetube-registry-test\\same-name.mp4";
+        assert!(!output_in_use(path));
+        register_output(path);
+        assert!(output_in_use(path), "登记后应视为有人占用");
+        register_output(path); // 第二个任务用同一个输出名
+        unregister_output(path);
+        assert!(output_in_use(path), "还有一个任务在用，不能放行清理");
+        unregister_output(path);
+        assert!(!output_in_use(path), "全部释放后才允许清理");
     }
 
     #[test]
@@ -1493,7 +1884,15 @@ mod tests {
         let errors = stderr.join().unwrap();
         assert!(result.unwrap().iter().any(|line| line.contains("pipes drained")));
         assert!(status.success());
-        assert!(errors.len() >= 1024 * 1024);
+        // 关键：子进程往 stderr 写 1MiB 也没被管道缓冲卡住（stdout 一直开着），
+        // 说明 stderr 确实被并发排空了。
+        assert!(!errors.is_empty(), "stderr 内容不该全丢");
+        // 同时缓冲必须有上限，1MiB 不会被整段留在内存里。
+        assert!(
+            errors.len() <= STDERR_TAIL_LIMIT,
+            "stderr 缓冲必须有上限，实际 {} 字节",
+            errors.len()
+        );
     }
 
     #[test]

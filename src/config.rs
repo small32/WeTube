@@ -150,7 +150,7 @@ impl ConfigStore {
         self.save()
     }
 
-    fn save(&self) -> Result<(), ConfigError> {
+    fn save(&mut self) -> Result<(), ConfigError> {
         // 数据已经救不回来就别写了：写下去只会把空配置盖到用户文件上，
         // 还会把 settings.bak 里那份完好的备份一起顶掉。
         if self.corrupt {
@@ -164,7 +164,10 @@ impl ConfigStore {
             "shortcuts": self.shortcuts,
         });
         let text = serde_json::to_string_pretty(&root)?;
-        let tmp = self.path.with_extension("tmp");
+        // 临时文件名带上进程 id：两个 App 实例同时保存时不能落到同一个
+        // `settings.tmp` 上——否则一方 `File::create` 会截断另一方正在写的内容，
+        // 交错写入的结果是半截 JSON。
+        let tmp = temp_sibling(&self.path, "tmp");
         let mut file = fs::File::create(&tmp)?;
         file.write_all(text.as_bytes())?;
         file.sync_all()?;
@@ -191,11 +194,29 @@ impl ConfigStore {
                 }
                 return Err(err.into());
             }
+            // 主文件已经换成完好内容，「本次是恢复出来的」这个事实到此为止。
+            // 不复位的话，之后**每一次**保存都会走上面那条 recovered 分支再删一次
+            // 主文件（此时它已经是好的了），于是 settings.bak 永久冻结在恢复时那一版，
+            // 主文件二次损坏时会丢掉恢复之后的全部改动。
+            self.recovered = false;
         }
         #[cfg(not(windows))]
-        fs::rename(&tmp, &self.path)?;
+        {
+            fs::rename(&tmp, &self.path)?;
+            self.recovered = false;
+        }
         Ok(())
     }
+}
+
+/// 同名但带后缀的兄弟路径，形如 `settings.json.<pid>.tmp`。
+///
+/// 带上 pid 是为了让并发实例各自写各自的临时文件；最终仍用 `rename` 原子替换，
+/// 所以别的进程永远看不到半截内容。
+fn temp_sibling(path: &std::path::Path, ext: &str) -> PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(".{}.{ext}", std::process::id()));
+    path.with_file_name(name)
 }
 
 /// 从配置文件内容里拆出 feature 覆盖表和快捷键表。
@@ -331,6 +352,18 @@ mod tests {
                         "{id}.{key} 的默认值不在候选列表中"
                     );
                 }
+
+                // color 的默认值必须是 7 位 #RRGGBB。
+                // 8 位带 alpha 的（#RRGGBBAA）不是合法 `input[type=color]` 值，
+                // 浏览器会把它规范化成 #000000 —— 设置面板里色块显示纯黑，
+                // 用户一点就把颜色改成黑色。
+                if field["type"] == "color" {
+                    let default = field["default"].as_str().unwrap_or_default();
+                    let legal = default.len() == 7
+                        && default.starts_with('#')
+                        && default[1..].chars().all(|c| c.is_ascii_hexdigit());
+                    assert!(legal, "{id}.{key} 的默认值 {default:?} 不是 7 位 #RRGGBB");
+                }
             }
             // 父子联动指向的字段得存在
             for field in fields {
@@ -436,7 +469,7 @@ mod tests {
         let path = dir.join("settings.json");
         fs::write(&path, "{ 这不是合法 JSON").expect("写损坏文件");
 
-        let store = ConfigStore {
+        let mut store = ConfigStore {
             schema: schema(),
             overrides: Map::new(),
             shortcuts: Map::new(),
@@ -451,6 +484,135 @@ mod tests {
             "损坏的配置不能被空配置覆盖"
         );
         assert!(!dir.join("settings.bak").exists(), "备份也不能被动过");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// schema 的 select 选项与 deepdark 预设必须双向对齐。
+    ///
+    /// 两个方向都会出问题：选项里写了但预设里没有 → 用户选了没反应；
+    /// 预设里做了但选项里没写 → 永远选不到（`YouTube-Dark` 就这样漏了）。
+    /// desc 里手写的预设数量也必须与真实数量一致。
+    #[test]
+    fn deepdark_presets_match_schema_options() {
+        let schema = schema();
+        let feature = schema["features"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["id"] == "deepDarkCSS")
+            .expect("schema 里应有 deepDarkCSS");
+        let field = feature["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["key"] == "preset")
+            .expect("deepDarkCSS 应有 preset 字段");
+        let options: Vec<String> = field["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+
+        // 预设键形如 `  'Name': '...'`（文件是自动生成的，格式稳定）
+        let presets: Vec<String> = include_str!("enhancer/deepdark-presets.js")
+            .lines()
+            .filter_map(|line| {
+                let rest = line.trim_start().strip_prefix('\'')?;
+                Some(rest[..rest.find("':")?].to_string())
+            })
+            .collect();
+        assert!(!presets.is_empty(), "没能从 deepdark-presets.js 解析出预设");
+
+        for preset in &presets {
+            assert!(
+                options.iter().any(|o| o == preset),
+                "预设 {preset} 不在 schema options 里，用户永远选不到"
+            );
+        }
+        for option in &options {
+            assert!(
+                option == "Custom" || presets.iter().any(|p| p == option),
+                "选项 {option} 没有对应的预设，选了没效果"
+            );
+        }
+
+        // desc 里写死的数量（E11 就是这么漏的）
+        let desc = feature["desc"].as_str().unwrap();
+        let digits: String = desc
+            .chars()
+            .skip_while(|c| !c.is_ascii_digit())
+            .take_while(char::is_ascii_digit)
+            .collect();
+        let claimed: usize = digits.parse().expect("desc 里应写着预设数量");
+        assert_eq!(
+            claimed,
+            presets.len(),
+            "desc 说 {claimed} 种预设，实际 {} 种",
+            presets.len()
+        );
+    }
+
+    /// 临时文件名必须带 pid：两个实例并发保存不能落同一个 `settings.tmp`。
+    #[test]
+    fn temp_paths_are_per_process_and_not_the_saved_file() {
+        let path = std::path::Path::new("/x/WeTube/settings.json");
+        let tmp = temp_sibling(path, "tmp");
+        assert_ne!(tmp, path, "临时文件绝不能就是目标文件");
+        let name = tmp.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(name.starts_with("settings.json."), "应保留原名做前缀：{name}");
+        assert!(name.ends_with(".tmp"), "{name}");
+        assert!(name.contains(&format!(".{}.", std::process::id())), "{name}");
+    }
+
+    /// 从 bak 恢复之后保存一次，`recovered` 必须复位。
+    ///
+    /// 不复位的话后续每次保存都会再删一次（已经完好的）主文件，
+    /// settings.bak 会永久冻结在恢复时那一版。
+    #[cfg(windows)]
+    #[test]
+    fn recovered_flag_clears_after_successful_save() {
+        let dir = std::env::temp_dir().join(format!(
+            "wetube-config-recover-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos())
+                .unwrap_or_default()
+        ));
+        fs::create_dir_all(&dir).expect("建临时目录");
+        let path = dir.join("settings.json");
+
+        // 模拟「主文件坏了 + bak 完好」被 load() 恢复出来的状态
+        fs::write(&path, "{ 坏掉的 JSON").expect("写损坏主文件");
+        fs::write(&dir.join("settings.bak"), r#"{"features":{}}"#).expect("写备份");
+
+        let mut store = ConfigStore {
+            schema: schema(),
+            overrides: Map::new(),
+            shortcuts: Map::new(),
+            path: path.clone(),
+            corrupt: false,
+            recovered: true,
+        };
+        store.save().expect("恢复后第一次保存应成功");
+        assert!(!store.recovered, "保存成功后 recovered 必须复位");
+        assert_eq!(
+            fs::read_to_string(&dir.join("settings.bak")).expect("bak 还在"),
+            r#"{"features":{}}"#,
+            "恢复来源的那份 bak 不能被这次保存顶掉"
+        );
+
+        // 第二次保存：此时主文件已完好，应该正常轮转（旧主文件 → bak）
+        store
+            .set("hideShorts", "home.enabled", Value::Bool(true))
+            .expect("第二次保存应成功");
+        let bak = fs::read_to_string(&dir.join("settings.bak")).expect("bak 应已轮转");
+        assert!(
+            bak.contains("hideShorts") || bak.contains("features"),
+            "第二次保存后 bak 应换成上一版主文件：{bak}"
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }

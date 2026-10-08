@@ -658,7 +658,7 @@
     {
       "id": "deepDarkCSS",
       "label": "深黑主题",
-      "desc": "比 YouTube 自带深色主题更黑的一套配色，32 种预设可选",
+      "desc": "比 YouTube 自带深色主题更黑的一套配色，31 种预设可选，也可自定义",
       "group": "appearance",
       "fields": [
         {
@@ -704,6 +704,7 @@
             "Orange",
             "Yellow",
             "Yellow-2",
+            "YouTube-Dark",
             "Custom"
           ]
         },
@@ -752,7 +753,7 @@
         {
           "key": "colors.colorShadow",
           "type": "color",
-          "default": "#383c4a4d",
+          "default": "#383c4a",
           "label": "阴影",
           "parent": "enabled"
         }

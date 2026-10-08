@@ -92,6 +92,73 @@ function setup(startUrl) {
   check("用户手输的链接不被覆盖", input.value === "https://example.com/custom", `value=${input.value}`);
 }
 
+/* ---- 3. 排队中的任务也算"有活"（E8） ---- */
+{
+  const { window } = setup("https://www.youtube.com/");
+  const fab = window.document.getElementById("wetube-dl-fab");
+  const badge = window.document.getElementById("wetube-dl-badge");
+  const visible = () => fab.style.display === "flex";
+  const nav = () => window.dispatchEvent(new window.Event("yt-navigate-finish"));
+
+  window.history.pushState({}, "", "/watch?v=aaaaaaaaaaa");
+  nav();
+
+  // 探测 → 点「下载」→ 卡片进入 queued（Rust 侧并发闸门满了就在这儿等）
+  window.__wetubeDownloadEvent({ kind: "probe-start", url: "https://x/1" });
+  window.__wetubeDownloadEvent({
+    kind: "probe-ok", url: "https://x/1", title: "T", duration: 61,
+    formats: [
+      { kind: "video", formatId: "137", height: 1080, ext: "mp4", size: 1024 },
+      { kind: "audio", formatId: "140", abr: 128, ext: "m4a", size: 128 },
+    ],
+  });
+  const go = window.document.querySelector("#wetube-dl-panel .t-go");
+  check("探测完成后出现下载按钮", Boolean(go), `go=${go && go.tagName}`);
+  go.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+
+  window.history.pushState({}, "", "/");
+  nav();
+  check("排队中的任务离开视频页仍显示悬浮球", visible(), `display=${fab.style.display}`);
+  check(
+    "排队中的任务计入角标",
+    badge.textContent === "1",
+    `badge=${badge.textContent} display=${badge.style.display}`
+  );
+
+  // 两个 started 的跑完、排队者还没收到 started 时，计数不能归零
+  window.__wetubeDownloadEvent({ kind: "started", id: 1, requestId: "r1", title: "T", url: "https://x/1" });
+  const badgeAfterStart = badge.textContent;
+  window.__wetubeDownloadEvent({ kind: "done", id: 1, detail: "a.mp4" });
+  window.__wetubeDownloadEvent({ kind: "started", id: 2, requestId: "r2", title: "T", url: "https://x/1" });
+  window.__wetubeDownloadEvent({ kind: "done", id: 2, detail: "b.mp4" });
+  check(
+    "先跑的任务完成后排队者仍在计数内（不闪）",
+    badgeAfterStart !== "0" && badge.textContent === "1",
+    `before=${badgeAfterStart} after=${badge.textContent}`
+  );
+}
+
+/* ---- 4. 终态卡片上限：pruneFinished 的 >40 裁剪分支 ---- */
+{
+  const { window } = setup("https://www.youtube.com/watch?v=aaaaaaaaaaa");
+  // 以前这个分支从没被跑到过：脚本最多只放两三张终态卡，
+  // "卡片只增不减"的回归就全落在 DOM 里没人管。
+  for (let i = 1; i <= 60; i += 1) {
+    window.__wetubeDownloadEvent({ kind: "started", id: i, requestId: `r${i}`, title: `T${i}`, url: "U" });
+    window.__wetubeDownloadEvent({ kind: "done", id: i, detail: `f${i}.mp4` });
+  }
+  const cards = [...window.document.querySelectorAll("#wetube-dl-panel .dl-task")];
+  check("终态卡片裁剪到 40 张以内", cards.length === 40, `cards=${cards.length}`);
+  const titles = cards.map((c) => c.querySelector(".t-title").textContent);
+  check("裁剪的是最老的，最新一张还在", titles.includes("T60"), `first=${titles[0]} last=${titles.at(-1)}`);
+  check("最老的一张已被移除", !titles.includes("T1"), `first=${titles[0]}`);
+  check(
+    "所有卡片都带 done 标记（没有卡在中间态）",
+    cards.every((c) => c.classList.contains("done")),
+    cards.filter((c) => !c.classList.contains("done")).length + " 张没标记"
+  );
+}
+
 /* ---- 输出 ---- */
 let failed = 0;
 for (const [name, ok, detail] of checks) {

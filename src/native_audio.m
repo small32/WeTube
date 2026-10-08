@@ -53,13 +53,19 @@ static OSStatus renderAudio(AudioObjectID device, const AudioTimeStamp *now,
     if (!output) return noErr;
     // 这三个字段由串行队列（start）写、IO 线程（本回调）读：各取一次到本地，
     // 既省掉重复原子读，也保证一整帧里看到的是同一份配置。
-    UInt32 tapBuffers = atomic_load_explicit(&r->tapBuffers, memory_order_relaxed);
-    double sampleRate = atomic_load_explicit(&r->sampleRate, memory_order_relaxed);
-    float rampGain = atomic_load_explicit(&r->rampGain, memory_order_relaxed);
+    //
+    // 用 acquire 而不是 relaxed：写端在串行队列里先写好 tapBuffers / sampleRate /
+    // rampGain 再启动设备，读端必须能"看到"这些写在启动之前完成——relaxed 不构成
+    // acquire/release 配对，形式上是数据竞争（TSan 会报）。
+    UInt32 tapBuffers = atomic_load_explicit(&r->tapBuffers, memory_order_acquire);
+    double sampleRate = atomic_load_explicit(&r->sampleRate, memory_order_acquire);
+    float rampGain = atomic_load_explicit(&r->rampGain, memory_order_acquire);
     atomic_fetch_add_explicit(&r->callbacks, 1, memory_order_relaxed);
     for (UInt32 b = 0; b < output->mNumberBuffers; b++)
         if (output->mBuffers[b].mData) memset(output->mBuffers[b].mData, 0, output->mBuffers[b].mDataByteSize);
-    if (!input || input->mNumberBuffers < tapBuffers || !output->mNumberBuffers) return noErr;
+    // tapBuffers == 0 时必须提前返回：否则下面 `first = mNumberBuffers - 0` 会让
+    // `&input->mBuffers[mNumberBuffers]` 越界读（当前时序不会走到，但代价为零）。
+    if (!input || tapBuffers == 0 || input->mNumberBuffers < tapBuffers || !output->mNumberBuffers) return noErr;
     // Duplex devices donate hardware input streams ahead of the tap; never read those.
     UInt32 first = input->mNumberBuffers - tapBuffers;
     const AudioBuffer *left = &input->mBuffers[first];
@@ -100,7 +106,7 @@ static OSStatus renderAudio(AudioObjectID device, const AudioTimeStamp *now,
             }
         }
     }
-    atomic_store_explicit(&r->rampGain, rampGain, memory_order_relaxed);
+    atomic_store_explicit(&r->rampGain, rampGain, memory_order_release);
     if (received) atomic_store_explicit(&r->samples, true, memory_order_relaxed);
     atomic_store_explicit(&r->inputPeak, inputPeak, memory_order_relaxed);
     atomic_store_explicit(&r->outputPeak, outputPeak, memory_order_relaxed);
@@ -112,7 +118,11 @@ static OSStatus renderAudio(AudioObjectID device, const AudioTimeStamp *now,
     dispatch_queue_t _queue;
     dispatch_source_t _timer;
     WTNotify _notify; void *_context;
-    bool _wanted, _shutdown; double _db; NSString *_request;
+    bool _wanted; double _db; NSString *_request;
+    // 由主线程（shutdown/update）写、串行队列上的 block 读。
+    // 裸 bool 没有 happens-before 边（形式 UB），`_Atomic` 的隐式访问是 seq_cst，
+    // 成本为零。
+    _Atomic(bool) _shutdown;
     _Atomic(uint64_t) _revision;
     AudioObjectID _tap, _aggregate, _output;
     AudioDeviceIOProcID _io;
@@ -226,12 +236,19 @@ static OSStatus renderAudio(AudioObjectID device, const AudioTimeStamp *now,
         NSMutableData *streams = [NSMutableData dataWithLength:size];
         result = AudioObjectGetPropertyData(_aggregate, &a, 0, NULL, &size, streams.mutableBytes);
         if (result != noErr) return result;
+        UInt32 outputChannels = 0;
         for (UInt32 i = 0; i < size / sizeof(AudioStreamID); i++) {
             AudioStreamBasicDescription out = {0};
             result = readProperty(((AudioStreamID *)streams.bytes)[i], kAudioStreamPropertyVirtualFormat, kAudioObjectPropertyScopeGlobal, &out, sizeof(out));
             if (result != noErr || out.mFormatID != kAudioFormatLinearPCM || !(out.mFormatFlags & kAudioFormatFlagIsFloat) || out.mBitsPerChannel != 32)
                 return result ?: kAudioHardwareUnsupportedOperationError;
+            outputChannels += out.mChannelsPerFrame;
         }
+        // renderAudio 只往 channel 0/1 写，其余声道停在 memset 出来的静音上。
+        // 多声道输出设备（5.1/7.1）在 armed 之后原声已被 mute，全靠本回调出声——
+        // 大于两声道就会"除了前置两声道之外全静音"。这种设备直接拒绝启用，
+        // 保持原声，而不是给用户一个残缺的音频。
+        if (outputChannels > 2) return kAudioHardwareUnsupportedOperationError;
         result = AudioDeviceCreateIOProcID(_aggregate, renderAudio, &_render, &_io);
         if (result != noErr) return result;
         UInt32 count = streamCount(_aggregate, kAudioObjectPropertyScopeInput);
@@ -364,12 +381,21 @@ static OSStatus renderAudio(AudioObjectID device, const AudioTimeStamp *now,
     values[1] = atomic_load(&_render.outputPeak);
     values[2] = atomic_load(&_render.armed) ? 1 : 0;
 }
-// 兜底：万一没走 shutdown 就被释放，也要停掉定时器，
-// 别让已经关掉的引擎继续在队列上重建聚合设备。
+// 兜底：万一没走 shutdown 就被释放，也必须停掉定时器并**拆掉音频设备**。
+//
+// 只取消定时器是不够的：`AudioDeviceCreateIOProcID(_aggregate, renderAudio, &_render, ...)`
+// 把 `&_render`（对象内嵌成员）交给实时线程当 context，对象一旦回收而设备还在跑，
+// IO 线程就会写已释放内存（use-after-free）。
+//
+// 正常调用链 Drop → wetube_audio_destroy → shutdown 已经拆过，这里只兜
+// 「绕过 shutdown 直接释放」这条异常路径。
+// 不 dispatch_sync 到 _queue：refresh 的 block 强引用 self，只要 block 还在排队或
+// 执行中对象就不可能 dealloc，所以此刻队列上必然没有并发操作，直接 stop 是安全的。
 - (void)dealloc {
     if (_shutdown) return;
     _shutdown = true;
     if (_timer) { dispatch_source_cancel(_timer); _timer = nil; }
+    [self stop];
 }
 @end
 

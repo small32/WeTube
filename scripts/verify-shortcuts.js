@@ -247,6 +247,95 @@ const check = (name, ok, detail) => checks.push([name, ok, detail]);
     `isOpen=${isOpen()}；若被切了两次这里会是关的`);
 }
 
+// 9. 开 → 关 → 开：不得重复挂监听、不得重复注入 <style>
+{
+  // 只统计面板自己那条监听（函数名 onCaptureKeyDown）。
+  // 不能按 type 全量数：jsdom 内部的 CSS 选择器引擎（dom-selector 的 Finder）
+  // 也会往 window 上挂 keydown，数进去就分不清谁是谁了。
+  const dom = new JSDOM(`<!doctype html><html><head></head><body></body></html>`, {
+    url: "https://www.youtube.com/",
+    runScripts: "outside-only",
+    pretendToBeVisual: true,
+  });
+  const { window } = dom;
+  window.__WETUBE_PLATFORM__ = "macos";
+  window.__WETUBE_SHORTCUTS__ = JSON.parse(JSON.stringify(REGISTRY));
+  window.ipc = { postMessage() {} };
+
+  const KEYDOWN_HANDLER = "onCaptureKeyDown";
+  const ours = [];
+  const add = window.addEventListener.bind(window);
+  const remove = window.removeEventListener.bind(window);
+  window.addEventListener = (type, fn, opts) => {
+    if (type === "keydown" && fn && fn.name === KEYDOWN_HANDLER) ours.push(fn);
+    return add(type, fn, opts);
+  };
+  window.removeEventListener = (type, fn, opts) => {
+    if (type === "keydown" && fn && fn.name === KEYDOWN_HANDLER) {
+      const i = ours.indexOf(fn);
+      if (i >= 0) ours.splice(i, 1);
+    }
+    return remove(type, fn, opts);
+  };
+
+  window.eval(fs.readFileSync(path.join(SRC, "ui.js"), "utf8"));
+  window.eval(fs.readFileSync(path.join(SRC, "shortcut-panel.js"), "utf8"));
+
+  const panelCount = () => window.document.querySelectorAll("#wetube-shortcut-panel").length;
+  const styleCount = () => window.document.querySelectorAll("#wetube-shortcut-panel-style").length;
+
+  window.__wetubeToggleShortcutPanel();
+  check("第一次打开面板存在", panelCount() === 1);
+  check("打开后挂上一条捕获监听", ours.length === 1, `now=${ours.length}`);
+
+  window.__wetubeToggleShortcutPanel(); // 关
+  check("关闭后面板被移除", panelCount() === 0);
+  check("关闭时摘掉自己那条监听", ours.length === 0, `now=${ours.length}`);
+
+  window.__wetubeToggleShortcutPanel(); // 再开
+  check("再次打开面板存在", panelCount() === 1);
+  check("重开后监听没有叠加", ours.length === 1, `now=${ours.length}`);
+  check("样式只注入一份", styleCount() === 1, `实际 ${styleCount()} 份`);
+}
+
+// 10. 保存确认：提交 ≠ 已保存；被 Rust 拒了要明说（E6）
+{
+  const { window, sent } = setup();
+  window.__wetubeToggleShortcutPanel();
+  const panel = window.document.getElementById("wetube-shortcut-panel");
+  const noteText = () => panel.querySelector(".sc-note").textContent;
+
+  rowFor(panel, "刷新").querySelectorAll("button")[0]
+    .dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  pressKey(window, { code: "KeyJ", key: "j", metaKey: true });
+  check("刚提交时不能说「已保存」", noteText().includes("已提交"), noteText());
+
+  // Rust 侧真保存成功 → 权威注册表推回来 → 这时才算数
+  const next = JSON.parse(JSON.stringify(REGISTRY));
+  next[2] = { ...next[2], spec: "Mod+KeyJ", display: "⌘J", custom: true };
+  window.__wetubeOnShortcutsChanged(next);
+  check("权威值确认后才显示「已保存」", noteText().includes("已保存"), noteText());
+}
+{
+  const { window, sent } = setup();
+  window.__wetubeToggleShortcutPanel();
+  const panel = window.document.getElementById("wetube-shortcut-panel");
+
+  rowFor(panel, "刷新").querySelectorAll("button")[0]
+    .dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  // PrintScreen 这类键 Rust 的解析表里没有：前端照样把 spec 发出去
+  pressKey(window, { code: "PrintScreen", key: "PrintScreen", metaKey: true });
+  const payload = lastMessage(sent, "shortcut:set");
+  check("不认识的键也会照发（判定权在 Rust）", !!payload && payload.spec === "Mod+PrintScreen", payload && payload.spec);
+
+  // Rust 回一条"被拒"：注册表没变，面板必须回到旧值且提示说人话
+  window.__wetubeOnShortcutRejected({ id: "reload", spec: "Mod+PrintScreen", reason: "系统不支持这个按键" });
+  const note = panel.querySelector(".sc-note");
+  check("被拒后有明确提示", note.textContent.includes("系统不支持这个按键"), note.textContent);
+  check("被拒时仍显示旧的快捷键", rowFor(panel, "刷新").querySelector(".sc-keys").textContent === "⌘R",
+    rowFor(panel, "刷新").querySelector(".sc-keys").textContent);
+}
+
 // ---------------------------------------------------------------- 输出
 
 let failed = 0;

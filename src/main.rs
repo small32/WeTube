@@ -229,7 +229,8 @@ fn truncate_log(path: &std::path::Path) {
     }
 }
 
-fn log_err(message: &str) {
+/// 全局错误日志。`download` 模块的 `log()` 也走这里，所以是 `pub(crate)`。
+pub(crate) fn log_err(message: &str) {
     // 先写文件再写 stderr：stderr 失败不应阻止文件日志写入
     if let Ok(mut guard) = LOG_FILE.lock() {
         if guard.is_none() {
@@ -991,6 +992,10 @@ fn apply_shortcut(
         Some(raw) => {
             if !shortcuts::is_valid(raw) {
                 log_err(&format!("忽略非法快捷键({id}): {raw}"));
+                // 只写日志是不够的：面板发完 `shortcut:set` 就把这条按键当成
+                // 保存好了，而 Rust 这边静默 return、注册表没变 → 面板上又显示
+                // 回旧值，用户以为改成功。必须明确回一条"被拒"，由面板还原提示。
+                reject_shortcut(webview, id, raw, "系统不支持这个按键");
                 return;
             }
             // 归一化成规范写法，冲突比对和"是否改过默认值"才准
@@ -1001,9 +1006,22 @@ fn apply_shortcut(
 
     if let Err(err) = store.set_shortcut(id, spec.as_deref()) {
         log_err(&format!("保存快捷键失败: {err}"));
+        reject_shortcut(webview, id, spec.as_deref().unwrap_or(""), "保存失败");
         return;
     }
     sync_shortcuts(store, webview, menu_items, Some(id));
+}
+
+/// 告诉页面「这次快捷键没被接受」。
+///
+/// 权威注册表本身不动（本来就该是旧值），面板收到后重绘即回到旧值，
+/// 并把提示从"已提交"改成一句人话——避免又一次静默失败。
+fn reject_shortcut(webview: &WebView, id: &str, spec: &str, reason: &str) {
+    let payload = serde_json::json!({ "id": id, "spec": spec, "reason": reason });
+    eval(
+        webview,
+        &format!("window.__wetubeOnShortcutRejected?.({payload});"),
+    );
 }
 
 /// 全部快捷键恢复默认。
@@ -1108,7 +1126,9 @@ fn debug_enabled() -> bool {
 
 fn debug_log(line: &str) {
     if debug_enabled() {
-        eprintln!("[WeTube] {line}");
+        // 走 log_err 而不是裸 eprintln!：release 版在 Windows 上没有控制台，
+        // `eprintln!` 写入失败会 panic——调试日志不该能带崩进程。
+        log_err(line);
     }
 }
 
@@ -1478,6 +1498,9 @@ fn install_menu(_menu: &Menu, _window: &Window) -> Result<(), Box<dyn Error>> {
 /// 这个消息会进入系统的模态拖动循环（鼠标被 OS 捕获，跟着光标走，松手结束），
 /// 跟拖原生标题栏完全一致——最大化态下拖动还会自动还原。WebView2 不认
 /// `-webkit-app-region: drag`，所以必须用这条系统消息来代替。
+///
+/// 注意：调用点用的是 `cfg(not(macos))`，所以这里必须对**所有非 macOS** 目标都有定义，
+/// 否则 Linux 上会 `E0425` 直接编不过。Linux 走下面的 `drag_window()`。
 #[cfg(target_os = "windows")]
 fn start_window_drag(window: &Window) {
     use std::ffi::c_void;
@@ -1507,4 +1530,12 @@ fn start_window_drag(window: &Window) {
             PostMessageW(hwnd, WM_SYSCOMMAND, SC_MOVE | HTCAPTION, 0);
         }
     }
+}
+
+/// Linux（及其它非 macOS 目标）的窗口拖动：直接交给 tao 的 `drag_window()`。
+///
+/// 调用点是 `cfg(not(macos))`，定义必须覆盖 Windows 之外的平台，否则编译期就挂。
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+fn start_window_drag(window: &Window) {
+    let _ = window.drag_window();
 }
