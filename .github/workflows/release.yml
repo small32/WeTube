@@ -210,11 +210,23 @@ jobs:
         if: matrix.target == 'x86_64-apple-darwin'
         run: |
           set -euo pipefail
-          source <(grep -E '^FFMPEG_(ARM|INTEL)_(URL|SHA256)=' scripts/build-macos-app.sh)
-          : "${FFMPEG_INTEL_URL:?没能从 build-macos-app.sh 取出 FFMPEG_INTEL_URL}"
-          : "${FFMPEG_INTEL_SHA256:?没能从 build-macos-app.sh 取出 FFMPEG_INTEL_SHA256}"
           TOOLS="$RUNNER_TEMP/wetube-tools"
           mkdir -p "$TOOLS"
+          # ffmpeg 的地址与哈希只在 scripts/build-macos-app.sh 头部定义一处，这里抽出来复用，
+          # 避免 workflow 里再抄一份、两边漂移。用 sed 取 `VAR="${VAR:-默认值}"` 里的默认值，
+          # **不要**用 `source <(...)`：进程替换依赖 bash 特性，在 runner 的 shell 下会静默拿到
+          # 空值（v3.0.8 首跑即因此 exit 1），sed 在任何 POSIX shell 下都稳。
+          extract_pin() {
+            sed -n "s/^$1=\"\${$1:-\(.*\)}\"$/\1/p" scripts/build-macos-app.sh | head -n 1
+          }
+          FFMPEG_INTEL_URL="$(extract_pin FFMPEG_INTEL_URL)"
+          FFMPEG_INTEL_SHA256="$(extract_pin FFMPEG_INTEL_SHA256)"
+          if [ -z "$FFMPEG_INTEL_URL" ] || [ -z "$FFMPEG_INTEL_SHA256" ]; then
+            echo "::error::没能从 scripts/build-macos-app.sh 抽出 FFMPEG_INTEL_*，请检查该文件头部的定义格式"
+            grep -n 'FFMPEG_INTEL' scripts/build-macos-app.sh || true
+            exit 1
+          fi
+          echo "使用 ffmpeg pin：$FFMPEG_INTEL_URL"
           # ffmpeg：osxexperts 的 Intel 静态构建（与 arm 版同源，无外部 dylib 依赖）。
           # 注意这个哈希属于**下载的 zip**，不是解出来的 ffmpeg。
           curl -fL --retry 3 -o "$RUNNER_TEMP/ffmpeg80intel.zip" "$FFMPEG_INTEL_URL"
