@@ -16,6 +16,8 @@
 	let context = null;
 	let currentGraph = null;
 	let observer = null;
+	/** observer 是否正在观察（离开播放页会 disconnect）。 */
+	let observing = false;
 	let button = null;
 	let videoKey = "";
 	let perVideoOn = false;
@@ -59,12 +61,16 @@
 	function requestNative(on) {
 		const next = on ? `on:${GAIN_DB}` : "off";
 		if (nativeKey === next) return;
-		nativeKey = next;
-		nativeRequest = `${nativePage}:${++nativeSequence}`;
+		const request = `${nativePage}:${++nativeSequence}`;
 		nativeState = { state: on ? "waiting" : "off", error: "" };
 		try {
 			if (typeof YTE.post !== "function") throw new Error("原生音频接口不可用");
-			YTE.post({ type: "volume-boost:set", enabled: on, amount: GAIN_DB, request: nativeRequest });
+			YTE.post({ type: "volume-boost:set", enabled: on, amount: GAIN_DB, request });
+			// 只在真的发出去之后才记账：以前 nativeKey 在 post 之前就写好了，
+			// post 一旦抛错，同方向再调用会因为"状态没变"直接 return，
+			// 音量增强就永远停在 error，直到换视频才恢复。
+			nativeKey = next;
+			nativeRequest = request;
 		} catch (err) {
 			nativeState = { state: "error", error: String(err.message ?? err) };
 		}
@@ -180,6 +186,12 @@
 			context = new AudioContext();
 			context.addEventListener("statechange", () => {
 				if (context.state === "running" && currentGraph) lastError = "";
+				// 关键：createMediaElementSource 一旦接管某个 <video>，
+				// 它的音频就只从 AudioContext 输出了——context 一旦 suspended
+				// （切标签页、音频设备变更、WebKit interrupt），视频就静音。
+				// 所以不管当前有没有开增强，只要建过 graph 就必须把 context 拉回
+				// running，否则"关掉音量增强之后反而没声音"。
+				if (context.state !== "running" && context.state !== "closed") resumeAudio();
 				updateButton();
 			});
 			// 即使设置已关闭，已接管的原声通路也需要在回到前台时恢复。
@@ -220,6 +232,9 @@
 			stopProbe();
 			if (currentGraph) currentGraph.gain.gain.value = 1;
 			currentGraph = null;
+			// 增强关掉了，但音频仍走 AudioContext（见 createGraph 的说明）：
+			// 必须保证 context 在跑，否则就是"关掉增强后整段视频没声音"。
+			resumeAudio();
 			return;
 		}
 		try {
@@ -251,9 +266,23 @@
 			hideTooltip();
 			if (currentGraph) currentGraph.gain.gain.value = 1;
 			currentGraph = null;
-			button?.remove();
+			resumeAudio();
+			// 离开播放页就别再盯着整棵 DOM 树了：播放期每一批 DOM 变更都会
+			// 触发一次 sync()（apply + updateButton 里好几次 getBoundingClientRect）。
+			stopObserving();
+			// 两个节点都要真的摘掉：原来只 remove() 不置空，tooltip 会一直残留在
+			// body 里，反复进出播放页就攒一堆游离节点。
+			if (button) {
+				button.remove();
+				button = null;
+			}
+			if (tooltip) {
+				tooltip.remove();
+				tooltip = null;
+			}
 			return;
 		}
+		startObserving();
 		const nextKey = key();
 		if (nextKey !== videoKey) {
 			videoKey = nextKey;
@@ -302,11 +331,24 @@
 	// 独立于设置运行，旧配置不影响开关和固定增益；切换视频恢复关闭。
 	function mount() {
 		observer = new MutationObserver(scheduleSync);
-		observer.observe(document.body ?? document.documentElement, { childList: true, subtree: true });
 		for (const event of ["yt-navigate-finish", "yt-page-data-updated", "popstate"]) {
 			window.addEventListener(event, scheduleSync);
 		}
 		sync();
+	}
+
+	// 只在播放页观察 DOM：非播放页（首页、搜索、频道页）播放期根本没有播放器，
+	// 让 observer 常驻只是白白跟着每一批 DOM 变更空转。
+	function startObserving() {
+		if (!observer || observing) return;
+		observer.observe(document.body ?? document.documentElement, { childList: true, subtree: true });
+		observing = true;
+	}
+
+	function stopObserving() {
+		if (!observer || !observing) return;
+		observer.disconnect();
+		observing = false;
 	}
 	if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", mount, { once: true });
 	else mount();

@@ -12,7 +12,7 @@
 
 	const PANEL_ID = "yte-settings-panel";
 	// 构建号戳：显示在面板底部，用于确认运行的是哪个版本（每次发布手动更新）。
-	const BUILD_STAMP = "3.0.6";
+	const BUILD_STAMP = "3.0.7";
 
 	// 页面里没有 devtools，任何 JS 错误都记到全局，面板 footer 会显示出来。
 	window.addEventListener("error", (event) => {
@@ -162,7 +162,8 @@
 		for (const [key, value] of Object.entries(props)) {
 			if (key === "class") node.className = value;
 			else if (key === "text") node.textContent = value;
-			else if (key === "html") node.innerHTML = value;
+			// 不再支持 html：YouTube 开了 Trusted Types，innerHTML 会直接抛错，
+			// 而且全仓本来就没有调用点。留着只是给后来人埋雷。
 			else if (key.startsWith("on")) node.addEventListener(key.slice(2).toLowerCase(), value);
 			else if (value !== null && value !== undefined) node.setAttribute(key, value);
 		}
@@ -315,6 +316,10 @@
 	// ---------------------------------------------------------------- 打开/关闭
 
 	function openPanel() {
+		// Esc 监听必须挂在"已存在则提前返回"**之前**：第二次打开时走的正是
+		// 下面那条 return，而 closePanel() 每次都会 removeEventListener——
+		// 结果是开→Esc 关→再开之后 Esc 永久失效。
+		document.addEventListener("keydown", onKeyDown, true);
 		if (root) {
 			root.style.display = "";
 			return;
@@ -369,7 +374,6 @@
 		document.documentElement.append(root);
 		render(body);
 
-		document.addEventListener("keydown", onKeyDown, true);
 		search.focus();
 	}
 

@@ -158,7 +158,9 @@
   position: fixed;
   top: 0; left: 0; right: 0;
   height: ${BAR_HEIGHT}px;
-  z-index: 2147483647;
+  /* 不能顶到 int 上限：快捷键面板的遮罩是 2147483200，chrome 比它高的话
+     模态弹层盖不住顶部 36px，标题栏按钮仍可点，模态语义就破了。 */
+  z-index: 2147483000;
   display: flex;
   align-items: stretch;
   font: 13px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
@@ -453,7 +455,8 @@
     const brandText = document.createElement("span");
     brandText.textContent = "WeTube";
     brand.appendChild(brandText);
-    brand.addEventListener("dblclick", () => send("window-toggle-maximize"));
+    // 不再绑 dblclick：双击 logo 会先派发两次 click（回到首页导航两次）
+    // 再切一次最大化。品牌区就是回首页，最大化交给标题栏空白处双击。
     brand.addEventListener("click", () => send("home"));
 
     /* 菜单条：macOS 上由系统菜单栏接管，不渲染 HTML 菜单。 */
@@ -547,6 +550,20 @@
     btnMax.appendChild(buildIcon("maximize", 16));
     btnMax.addEventListener("click", () => send("window-toggle-maximize"));
 
+    /* 双击标题栏、Win+↑、贴边、绿色按钮这些系统路径都不经过上面的 click，
+     * 按钮图标必须靠 Rust 在 Resized 里回推的状态才不会长期停在「最大化」。 */
+    let maximizedNow = false;
+    window.__wetubeSetMaximized = (maximized) => {
+      const next = maximized === true;
+      if (next === maximizedNow) return;
+      maximizedNow = next;
+      btnMax.textContent = "";
+      btnMax.appendChild(buildIcon(next ? "restore" : "maximize", 16));
+      btnMax.title = next ? "还原" : "最大化";
+      btnMax.setAttribute("aria-label", btnMax.title);
+      btnMax.classList.toggle("is-maximized", next);
+    };
+
     const btnClose = document.createElement("button");
     btnClose.className = "wetube-winbtn close";
     btnClose.title = "关闭";
@@ -581,7 +598,9 @@
         if (Math.hypot(moveEv.screenX - startX, moveEv.screenY - startY) < 4) return;
         dragging = true;
         cleanup();
-        if (window.__WETUBE_PLATFORM__ === "windows") send("window-drag");
+        // Windows 与 Linux 都去掉了原生标题栏，只能由 Rust 调 tao 的
+        // drag_window 接管；原来只判 windows，Linux 上窗口根本拖不动。
+        if (window.__WETUBE_PLATFORM__ !== "macos") send("window-drag");
       };
       window.addEventListener("mousemove", onMove, true);
       window.addEventListener("mouseup", cleanup, true);

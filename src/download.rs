@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// 构建期内嵌的外置工具（Windows 单文件分发用）。由 build.rs 生成：
 /// 有 vendor/<工具> 时是真实字节数组，否则是空切片。
@@ -378,6 +378,70 @@ static CHILDREN: std::sync::LazyLock<Mutex<HashMap<u32, std::sync::Arc<Mutex<Tas
 
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
+/// 同时允许的下载任务数。
+///
+/// 页面上的「排队中」以前是假的：每个请求一到就立刻 spawn 一个 yt-dlp，
+/// 每个 yt-dlp 再开 8 个并发分片，连点几个就把带宽打满、全部一起变慢。
+/// 这里给一个真实的上限，多出来的任务排队等槽位。
+const MAX_CONCURRENT_JOBS: usize = 2;
+
+/// 并发闸门：计数 + 条件变量，满了就在后台线程里等。
+struct JobGate {
+    running: Mutex<usize>,
+    changed: std::sync::Condvar,
+}
+
+static JOB_GATE: std::sync::LazyLock<JobGate> = std::sync::LazyLock::new(|| JobGate {
+    running: Mutex::new(0),
+    changed: std::sync::Condvar::new(),
+});
+
+/// 试着占一个槽位，占不到返回 false（调用方据此决定要不要排队）。
+fn try_acquire_slot() -> bool {
+    let Ok(mut running) = JOB_GATE.running.lock() else { return false; };
+    if *running >= MAX_CONCURRENT_JOBS {
+        return false;
+    }
+    *running += 1;
+    true
+}
+
+/// 阻塞等一个槽位。只在后台排队线程里用，主线程不能调。
+fn acquire_slot() {
+    let Ok(mut running) = JOB_GATE.running.lock() else { return; };
+    while *running >= MAX_CONCURRENT_JOBS {
+        match JOB_GATE.changed.wait(running) {
+            Ok(guard) => running = guard,
+            Err(poisoned) => {
+                running = poisoned.into_inner();
+                break;
+            }
+        }
+    }
+    *running += 1;
+}
+
+/// 归还槽位并唤醒一个排队中的任务。
+fn release_slot() {
+    if let Ok(mut running) = JOB_GATE.running.lock() {
+        *running = running.saturating_sub(1);
+        JOB_GATE.changed.notify_all();
+    }
+}
+
+/// 预热：把内嵌的 yt-dlp / ffmpeg / qjs 提前解压好。
+///
+/// 首次下载时才解压的话，ffmpeg 那 98MB 的 xz 流式解压跑在主线程上，
+/// 界面会冻住好几秒。启动时在后台线程里做掉，等用户点下载就已经就绪。
+pub fn warmup() {
+    std::thread::spawn(|| {
+        let _ = yt_dlp_path();
+        let _ = ffmpeg_path();
+        let _ = deno_path();
+        download_log("内嵌工具预热完成");
+    });
+}
+
 /// 自增任务 id。从 1 开始，0 留作"无效"。
 static NEXT_ID: AtomicU32 = AtomicU32::new(1);
 
@@ -385,13 +449,21 @@ static NEXT_ID: AtomicU32 = AtomicU32::new(1);
 #[derive(Default)]
 pub struct EventHistory {
     tasks: std::collections::BTreeMap<u64, Vec<Value>>,
+    /// 任务入场顺序（只记 started 的键），裁剪时按它删最早的。
+    order: Vec<u64>,
 }
 
 impl EventHistory {
     pub fn record(&mut self, event: &Value) {
-        let Some(id) = event["id"].as_u64().filter(|id| *id != 0) else { return; };
+        let Some(id) = history_key(event) else { return; };
         match event["kind"].as_str() {
-            Some("started") => { self.tasks.entry(id).or_insert_with(|| vec![event.clone()]); }
+            Some("started") => {
+                if self.tasks.contains_key(&id) {
+                    return;
+                }
+                self.order.push(id);
+                self.tasks.insert(id, vec![event.clone()]);
+            }
             Some("progress" | "done" | "fail" | "cancelled") => {
                 if let Some(events) = self.tasks.get_mut(&id) {
                     if events.last().is_some_and(|e| e["kind"] == "done" || e["kind"] == "fail") { return; }
@@ -401,12 +473,36 @@ impl EventHistory {
             }
             _ => return,
         }
-        let finished: Vec<_> = self.tasks.iter().filter(|(_, events)| {
-            events.last().is_some_and(|e| e["kind"] == "done" || e["kind"] == "fail")
-        }).map(|(id, _)| *id).collect();
-        for id in finished.iter().take(finished.len().saturating_sub(100)) {
-            self.tasks.remove(id);
+        // 裁剪：按**入场顺序**删最早完成的，保留最近 100 条。
+        // 原来按 BTreeMap 的 id 升序删，等于删 id 最小的——id 与完成先后无关，
+        // 刚下完的大 id 会被留着、早期的反而先没。
+        let finished: std::collections::HashSet<u64> = self
+            .tasks
+            .iter()
+            .filter(|(_, events)| {
+                events.last().is_some_and(|e| e["kind"] == "done" || e["kind"] == "fail")
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        if finished.len() <= 100 {
+            return;
         }
+        let mut seen = 0usize;
+        let mut doomed: std::collections::HashSet<u64> = std::collections::HashSet::new();
+        for id in self.order.iter().rev() {
+            if !finished.contains(id) {
+                continue;
+            }
+            seen += 1;
+            if seen > 100 {
+                doomed.insert(*id);
+            }
+        }
+        if doomed.is_empty() {
+            return;
+        }
+        self.tasks.retain(|id, _| !doomed.contains(id));
+        self.order.retain(|id| !doomed.contains(id));
     }
 
     pub fn snapshot(&self) -> Vec<Value> {
@@ -414,13 +510,38 @@ impl EventHistory {
     }
 }
 
+/// 历史事件用的键。
+///
+/// 启动就失败的任务没有任务 id（`id: 0`），以前直接被丢掉——页面一旦重载，
+/// 那张卡片就永远停在「排队中」。这里用 requestId 派生一个高位键：
+/// 真实 id 从 1 开始自增，高位那一半不可能撞上。
+fn history_key(event: &Value) -> Option<u64> {
+    if let Some(id) = event["id"].as_u64().filter(|id| *id != 0) {
+        return Some(id);
+    }
+    use std::hash::{Hash, Hasher};
+    let request_id = event["requestId"].as_str()?;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    request_id.hash(&mut hasher);
+    Some(0x8000_0000_0000_0000 | (hasher.finish() & 0x7fff_ffff_ffff_ffff))
+}
+
 /// kill 掉一个下载任务。返回是否真的杀掉了（页面据此提示）。
 ///
 /// 逻辑：先 try_wait 看进程是否已自己退出；若还在跑，设 canceled=true 再 kill。
 /// cancel() 不删除 CHILDREN 条目，由 cleanup 线程统一 wait + 移除。
 pub fn cancel(id: u32) -> bool {
-    let Ok(map) = CHILDREN.lock() else { return false; };
-    let Some(arc) = map.get(&id) else { return false; };
+    // 先把 Arc 克隆出来就放开进程表的锁。
+    //
+    // 原来一直握着 map 的 guard 再去 `arc.lock()`，而 cleanup 线程此刻可能正
+    // 持着 arc 阻塞在 `child.wait()` 上——这期间任何新的 download::start 都会
+    // 卡在 `CHILDREN.lock()`，而它跑在主线程上（UI 直接假死到当前下载结束）。
+    // 持锁时间越短越好，这里只需要一次查表。
+    let arc = {
+        let Ok(map) = CHILDREN.lock() else { return false; };
+        map.get(&id).cloned()
+    };
+    let Some(arc) = arc else { return false; };
     let mut handle = match arc.lock() { Ok(h) => h, Err(_) => return false };
     // 先 try_wait 检查进程是否已经退出
     if handle.child.as_mut().and_then(|c| c.try_wait().ok().flatten()).is_some() {
@@ -448,9 +569,14 @@ pub fn cancel(id: u32) -> bool {
 /// 残留的 yt-dlp 会把当前任务下完自然退出，不会永久驻留；.part 续传
 /// 机制保证下次下载同一视频时接着传，不算数据损坏。
 pub fn kill_all() {
-    let Ok(mut map) = CHILDREN.lock() else { return; };
-    let running = map.len();
-    for (_, arc) in map.drain() {
+    // 同样先把条目搬出来再逐个 kill：terminate_tree 在 Windows 上会同步跑
+    // taskkill 并等它退出，这期间不该占着进程表的锁。
+    let tasks: Vec<_> = {
+        let Ok(mut map) = CHILDREN.lock() else { return; };
+        map.drain().collect()
+    };
+    let running = tasks.len();
+    for (_, arc) in tasks {
         if let Ok(mut handle) = arc.lock() {
             let process_group = handle.process_group;
             if let Some(ref mut c) = handle.child {
@@ -606,11 +732,13 @@ pub fn probe(url: &str, cookies: &CookieSource) -> Result<Value, String> {
     with_utf8_output(&mut cmd);
     cmd.arg("-J").arg("--no-warnings");
     cookies.apply(&mut cmd);
-    cmd.arg(url);
     if let Some(path) = ffmpeg_path() {
         cmd.arg("--ffmpeg-location").arg(&path);
     }
     with_deno(&mut cmd, &deno_path());
+    // 跟 start() 一致，用 `--` 把 URL 和选项隔开：否则以 `-` 开头的输入
+    // （`--version`、`-o xxx`）会被 argparse 当成选项，探测行为被改写。
+    cmd.arg("--").arg(url);
     let output = cmd
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -817,6 +945,66 @@ fn parse_progress_line(line: &str) -> Option<Value> {
     }))
 }
 
+/// 多流任务的进度聚合器。
+///
+/// 音视频分离的格式（`bv*+ba`、`137+ba`……）yt-dlp 会**按流各输出一轮进度**：
+/// 视频轨走到 100.0% 之后，音频轨又从 0.3% 开始。直接把百分比透传给页面，
+/// 进度条就会到顶后跳回 0（用户以为卡死或已完成）。
+///
+/// 这里按字节把已完成的流累加进 `base`：切到下一流时把上一条流观测到的
+/// 最大已下载字节计入基数，再用 `(base + 当前已下载) / (base + 当前总量)`
+/// 算整体百分比。拿不到总量（yt-dlp 早期输出 `NA`）时保持原样透传。
+#[derive(Default)]
+struct ProgressAggregator {
+    /// 前面几条流已经下完的字节总和
+    base_bytes: u64,
+    /// 当前这条流观测到的最大已下载字节
+    stream_peak: u64,
+    /// 上一行报的已下载字节，用于识别"换流"（字节数骤降）
+    last_downloaded: u64,
+    /// 上一行报的当前流总量
+    last_total: u64,
+}
+
+impl ProgressAggregator {
+    /// 吃进一行 yt-dlp 进度，返回应发给页面的进度对象。
+    fn feed(&mut self, progress: Value) -> Value {
+        let downloaded = progress["downloaded"].as_u64().unwrap_or(0);
+        let total = progress["total"].as_u64().unwrap_or(0);
+
+        // 换流判定：字节数明显回退（新流从头开始），或总量变了且已下载归零。
+        let switched = downloaded + 1024 < self.last_downloaded
+            || (total > 0 && self.last_total > 0 && total != self.last_total && downloaded == 0);
+        if switched {
+            self.base_bytes = self.base_bytes.saturating_add(self.stream_peak);
+            self.stream_peak = 0;
+        }
+        self.stream_peak = self.stream_peak.max(downloaded);
+        if total > 0 {
+            self.last_total = total;
+        }
+        self.last_downloaded = downloaded;
+
+        let overall_total = self.base_bytes.saturating_add(total);
+        // 没有百分比字符串（异常行）就没法换算，原样透传。
+        if !progress["percent"].is_string() {
+            return progress;
+        }
+        // 总量未知（NA）时 yt-dlp 自己那串百分比就是唯一可用信息，原样透传。
+        if overall_total == 0 {
+            return progress;
+        }
+        let overall_downloaded = self.base_bytes.saturating_add(downloaded);
+        let pct = (overall_downloaded as f64 / overall_total as f64 * 100.0).clamp(0.0, 100.0);
+
+        let mut out = progress;
+        out["percent"] = Value::from(format!("{pct:.1}%"));
+        out["downloaded"] = Value::from(overall_downloaded);
+        out["total"] = Value::from(overall_total);
+        out
+    }
+}
+
 /// 开始一次下载。立即返回任务 id；进度经 `on_event` 回调逐行送出，
 /// 结束（成功/失败/被杀）时回调 `done=false/true/killed`。
 ///
@@ -824,25 +1012,106 @@ fn parse_progress_line(line: &str) -> Option<Value> {
 /// `formatId` 为空时按 mode 给 yt-dlp 默认选择器。
 pub fn start(
     job: Job<'_>,
-    on_started: impl Fn(u32),
+    on_started: impl Fn(u32) + Send + 'static,
     on_event: impl Fn(u32, Value) + Send + 'static,
     done: impl Fn(u32, bool, Option<String>) + Send + 'static,
     on_cancelled: impl Fn(u32) + Send + 'static,
 ) -> Result<u32, String> {
-    let Job {
-        url,
-        mode,
-        format_id,
-        has_audio,
-        out_dir,
-        concurrent,
-        cookies,
-    } = job;
+    let job = OwnedJob::new(&job);
 
-    let ytdlp = yt_dlp_path().ok_or("未找到 yt-dlp（App 包损坏或未安装）")?;
-    std::fs::create_dir_all(out_dir).map_err(|err| format!("创建下载目录失败：{err}"))?;
+    // 这两个校验都很轻，留在主线程同步做：出错时调用方能立刻拿到 Err。
+    yt_dlp_path().ok_or("未找到 yt-dlp（App 包损坏或未安装）")?;
+    std::fs::create_dir_all(&job.out_dir).map_err(|err| format!("创建下载目录失败：{err}"))?;
 
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+
+    // 四个回调要能在两条路径里共用（槽位空：主线程直接跑；槽位满：搬去后台
+    // 排队），排队线程还要在 run_job 失败时用 done 回报，所以包一层 Arc<Mutex>
+    // ——裸闭包没法既 move 进 run_job 又在外面再调一次。
+    let on_started: StartedCb = Arc::new(Mutex::new(on_started));
+    let on_event: ProgressCb = Arc::new(Mutex::new(on_event));
+    let done: DoneCb = Arc::new(Mutex::new(done));
+    let on_cancelled: CancelCb = Arc::new(Mutex::new(on_cancelled));
+
+    // 并发闸门：同时最多跑 MAX_CONCURRENT_JOBS 个 yt-dlp。
+    // 槽位还有就照旧在主线程起进程（失败能同步返回）；槽位满了才整包
+    // 搬到后台线程排队——页面显示的「排队中」到这时才是真的在排队。
+    if try_acquire_slot() {
+        if let Err(err) = run_job(
+            id,
+            job,
+            Arc::clone(&on_started),
+            Arc::clone(&on_event),
+            Arc::clone(&done),
+            Arc::clone(&on_cancelled),
+        ) {
+            release_slot();
+            return Err(err);
+        }
+        return Ok(id);
+    }
+    std::thread::spawn(move || {
+        acquire_slot();
+        if let Err(err) = run_job(id, job, on_started, on_event, Arc::clone(&done), on_cancelled) {
+            release_slot();
+            call_done(&done, id, false, Some(err));
+        }
+    });
+    Ok(id)
+}
+
+type StartedCb = Arc<Mutex<dyn Fn(u32) + Send + 'static>>;
+type ProgressCb = Arc<Mutex<dyn Fn(u32, Value) + Send + 'static>>;
+type DoneCb = Arc<Mutex<dyn Fn(u32, bool, Option<String>) + Send + 'static>>;
+type CancelCb = Arc<Mutex<dyn Fn(u32) + Send + 'static>>;
+
+/// 调一次 done 回调（锁中毒时静默跳过，回调只用于通知 UI，不值得为它 panic）。
+fn call_done(done: &DoneCb, id: u32, ok: bool, detail: Option<String>) {
+    if let Ok(callback) = done.lock() {
+        callback(id, ok, detail);
+    }
+}
+
+/// `Job` 的拥有所有权版本：`start()` 可能要把整包搬进后台线程排队，
+/// 借用的 `&str` 带不进去。
+struct OwnedJob {
+    url: String,
+    mode: String,
+    format_id: String,
+    has_audio: bool,
+    out_dir: std::path::PathBuf,
+    concurrent: u32,
+    cookies: CookieSource,
+}
+
+impl OwnedJob {
+    fn new(job: &Job<'_>) -> Self {
+        Self {
+            url: job.url.to_string(),
+            mode: job.mode.to_string(),
+            format_id: job.format_id.to_string(),
+            has_audio: job.has_audio,
+            out_dir: job.out_dir.to_path_buf(),
+            concurrent: job.concurrent,
+            cookies: job.cookies.clone(),
+        }
+    }
+}
+
+/// 真正起进程的那一步：构造命令行、spawn、注册进程表、拉起读取线程。
+/// 调用方负责槽位的获取与释放。
+fn run_job(
+    id: u32,
+    job: OwnedJob,
+    on_started: StartedCb,
+    on_event: ProgressCb,
+    done: DoneCb,
+    on_cancelled: CancelCb,
+) -> Result<(), String> {
+    let OwnedJob { url, mode, format_id, has_audio, out_dir, concurrent, cookies } = job;
+    let ytdlp = yt_dlp_path().ok_or("未找到 yt-dlp（App 包损坏或未安装）")?;
+    std::fs::create_dir_all(&out_dir).map_err(|err| format!("创建下载目录失败：{err}"))?;
+
     // ffmpeg 只探一次：下面选选择器和工作目录都要用
     let ffmpeg = ffmpeg_path();
     // deno 同样只探一次：EJS 挑战需要 JS runtime，没有它每次都会告警
@@ -874,7 +1143,7 @@ pub fn start(
         // 一起吞掉——进度条与最终文件路径都靠这些行，必须显式关掉静默。
         .arg("--no-quiet")
         .arg("-P")
-        .arg(out_dir);
+        .arg(&out_dir);
     if let Some(path) = &ffmpeg {
         cmd.arg("--ffmpeg-location").arg(path);
     }
@@ -884,14 +1153,16 @@ pub fn start(
     if mode == "audio" {
         if ffmpeg.is_some() {
             cmd.arg("-x").arg("--audio-format").arg("m4a");
-            if !format_id.is_empty() {
-                cmd.arg("-f").arg(format_id);
-            }
+            // 不指定 -f 时 yt-dlp 走默认 `bestvideo*+bestaudio`：先把整条视频
+            // 下下来再抽音频，白下一遍视频轨。给音轨选择器，与下面的
+            // 无 ffmpeg 分支保持一致。
+            cmd.arg("-f")
+                .arg(or_default(&format_id, "bestaudio[ext=m4a]/bestaudio/best"));
         } else {
             // 没有 ffmpeg 时 `-x` 会直接报错退出，退一步：拿原始音轨
             // 不做转封装（通常本来就是 m4a/webm）。总好过整条任务失败。
             cmd.arg("-f")
-                .arg(or_default(format_id, "bestaudio[ext=m4a]/bestaudio/best"));
+                .arg(or_default(&format_id, "bestaudio[ext=m4a]/bestaudio/best"));
         }
     } else {
         // 一律产出 mp4：指定合并容器，再 remux 一道兜住 webm 源
@@ -901,15 +1172,15 @@ pub fn start(
             .arg("--remux-video")
             .arg("mp4")
             .arg("-f")
-            .arg(video_selector(format_id, has_audio, ffmpeg.is_some()));
+            .arg(video_selector(&format_id, has_audio, ffmpeg.is_some()));
     }
     cmd.arg("--").arg(url);
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
-    // 诊断日志要用的 owned 副本：下面的读取线程是 'static 的 move 闭包，
-    // 而 Job 里的 mode/format_id 是借来的 &str，直接带进去会借用逃逸。
-    let mode_log = mode.to_string();
-    let format_log = format_id.to_string();
+    // 诊断日志要用的副本：下面整段会搬进 'static 的读取线程，
+    // 借用传不进去。
+    let mode_log = mode.clone();
+    let format_log = format_id.clone();
 
     #[cfg(unix)]
     {
@@ -933,14 +1204,21 @@ pub fn start(
     let stderr_reader = drain_stderr(stderr);
 
     // 必须先入队 started，再允许工作线程发送进度或终态事件。
-    on_started(id);
+    if let Ok(cb) = on_started.lock() {
+        cb(id);
+    }
 
     // 读 stdout：进度行 + 最终文件路径行
     std::thread::spawn(move || {
         let mut final_path: Option<String> = None;
+        let mut aggregator = ProgressAggregator::default();
         for line in lines_lossy(stdout) {
             if let Some(event) = parse_progress_line(&line) {
-                on_event(id, event);
+                // 音视频分离时 yt-dlp 会分两条流各报一轮 0→100，
+                // 聚合后再发，进度条才不会到顶后跳回 0。
+                if let Ok(cb) = on_event.lock() {
+                    cb(id, aggregator.feed(event));
+                }
             } else if let Some(path) = parse_final_path(&line) {
                 final_path = Some(path);
             } else if let Some(path) = line.strip_prefix("[Merger] ") {
@@ -974,7 +1252,8 @@ pub fn start(
         let arc = match CHILDREN.lock().ok().and_then(|mut map| map.remove(&id)) {
             Some(a) => a,
             None => {
-                done(id, false, Some("进程表状态异常".to_string()));
+                release_slot();
+                call_done(&done, id, false, Some("进程表状态异常".to_string()));
                 return;
             }
         };
@@ -994,7 +1273,8 @@ pub fn start(
             let mut handle = match arc.lock() {
                 Ok(h) => h,
                 Err(_) => {
-                    done(id, false, Some("进程表损坏".to_string()));
+                    release_slot();
+                    call_done(&done, id, false, Some("进程表损坏".to_string()));
                     return;
                 }
             };
@@ -1018,14 +1298,46 @@ pub fn start(
                 Err(e) => Err(e),
             }
         };
+        // 任务到这里就退出闸门了，排队中的下一个可以开始。
+        release_slot();
+        let final_path_for_cleanup = final_path.clone();
         match result {
-            Ok(true) => done(id, true, final_path),
-            Ok(false) => on_cancelled(id),
-            Err(detail) => done(id, false, Some(detail)),
+            Ok(true) => call_done(&done, id, true, final_path),
+            Ok(false) => {
+                // 取消/失败都清一次半截文件：.part 靠 yt-dlp 续传能救回来，
+                // 但用户手动删任务的语义是"别留下垃圾"。
+                cleanup_partials(final_path_for_cleanup.as_deref());
+                if let Ok(cb) = on_cancelled.lock() {
+                    cb(id);
+                }
+            }
+            Err(detail) => {
+                cleanup_partials(final_path_for_cleanup.as_deref());
+                call_done(&done, id, false, Some(detail));
+            }
         }
     });
 
-    Ok(id)
+    Ok(())
+}
+
+/// 清掉一次下载留下的半截文件。
+///
+/// yt-dlp 下载中是 `xxx.mp4.part`（合并前还有 `.f137.mp4` 之类的分流文件），
+/// 抽音频时是 `xxx.webm.ytdl`。取消或失败后它们会一直躺在下载目录里，
+/// 积少成多。只删这两个确切后缀，绝不碰已经落地的成品。
+fn cleanup_partials(final_path: Option<&str>) {
+    let Some(path) = final_path else { return; };
+    for suffix in [".part", ".ytdl"] {
+        let candidate = format!("{path}{suffix}");
+        if std::path::Path::new(&candidate).is_file() {
+            if let Err(err) = std::fs::remove_file(&candidate) {
+                download_log(&format!("清理半截文件失败 {candidate}: {err}"));
+            } else {
+                download_log(&format!("已清理半截文件 {candidate}"));
+            }
+        }
+    }
 }
 
 fn parse_final_path(line: &str) -> Option<String> {
@@ -1401,7 +1713,10 @@ mod tests {
             eprintln!("本次构建未内嵌 {stem}，跳过");
             return;
         }
-        let dir = std::env::temp_dir().join("wetube-embedded-test");
+        // 目录按工具名分开：三个内嵌工具的测试是并行跑的，共用一个目录时会
+        // 互相踩（正在写 .tmp 的那份被另一条测试的 prune_other_copies 删掉，
+        // 或 rename 撞车 → Windows 上 "拒绝访问"）。
+        let dir = std::env::temp_dir().join(format!("wetube-embedded-test-{stem}"));
         std::fs::create_dir_all(&dir).unwrap();
 
         let path =
@@ -1441,7 +1756,9 @@ mod tests {
             eprintln!("本次构建未内嵌 ffmpeg，跳过");
             return;
         }
-        let dir = std::env::temp_dir().join("wetube-embedded-test");
+        // 与 extract_and_run 的 ffmpeg 用例分开：那边的用例会解压并执行这个
+        // 98MB 的文件，两个测试并行跑同一个目录必定撞车（"拒绝访问"）。
+        let dir = std::env::temp_dir().join("wetube-embedded-test-ffmpeg-path");
         std::fs::create_dir_all(&dir).unwrap();
         let path = extract_tool(
             &dir,

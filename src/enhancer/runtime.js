@@ -77,6 +77,11 @@
 	function pageType() {
 		const { pathname, search } = location;
 		if (pathname === "/") return "home";
+		// /live/<id> 是直播间的独立路径。以前它落到 "other"，而依赖里写
+		// `pages: ["live"]` 的功能经 LIVE_ALIAS 映射后要的就是 "watch"，
+		// 结果这类功能在直播间永远不生效。直播按 watch 页处理（与下面
+		// LIVE_ALIAS 的语义一致），是不是真直播由功能自己判断。
+		if (pathname.startsWith("/live")) return "watch";
 		if (pathname.startsWith("/watch")) return "watch";
 		if (pathname.startsWith("/shorts")) return "shorts";
 		if (pathname.startsWith("/results")) return "search";
@@ -209,7 +214,10 @@
 	async function playerReady(player) {
 		try {
 			const state = player.getPlayerStateObject?.();
-			if (state && (!state.isUnstarted || !state.isBuffering)) return true;
+			// 原来是 `!isUnstarted || !isBuffering`，两个条件只要有一个成立就真，
+			// 等于把"播放器就绪"这道过滤整个放弃了——unstarted 的空播放器也会
+			// 被认为就绪，后面 setPlaybackQuality/setVolume 就作用在空壳上。
+			if (state && !state.isUnstarted) return true;
 		} catch {
 			/* 内部 API 可能不存在，走 video 兜底 */
 		}
@@ -329,9 +337,13 @@
 	}
 
 	async function syncAll({ force = false } = {}) {
-		for (const id of Object.keys(YTE.features)) {
-			await syncFeature(id, { force });
-		}
+		// 各功能之间互不依赖，串行 await 会被单个功能卡住整条链：
+		// hideMastheadWhilePlaying 的 waitForPlayer(5s) 或字幕翻译的 30s 注入
+		// deadline 一慢，后面二十多个功能就整体推迟生效。
+		// allSettled 保证单个功能抛错也不会拖垮其余。
+		await Promise.allSettled(
+			Object.keys(YTE.features).map((id) => syncFeature(id, { force }))
+		);
 	}
 
 	// ---------------------------------------------------------------- SPA 导航

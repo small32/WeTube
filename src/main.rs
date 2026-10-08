@@ -211,8 +211,23 @@ fn build_window_icon() -> Option<Icon> {
 /// 这里同时追加写入日志文件，无论是否有控制台都保证错误被记录。
 ///
 /// 日志文件路径：`dirs::data_dir()/WeTube/webrtc.err.log`（macOS 和 Windows 同源）。
-static LOG_FILE: std::sync::Mutex<Option<std::fs::File>> =
+/// 日志文件上限：8 MiB。以前只追加不轮转，跑久了能涨到几百 MB。
+const LOG_MAX_BYTES: u64 = 8 * 1024 * 1024;
+
+/// 句柄 + 已写字节数。长度自己累加，省得每条日志一次 metadata() 系统调用。
+static LOG_FILE: std::sync::Mutex<Option<(std::fs::File, u64)>> =
     std::sync::Mutex::new(None);
+
+/// 把日志文件清空。
+///
+/// 不能直接用 append 句柄 `set_len(0)`：Windows 下以 `.append(true)` 打开的
+/// 文件不含写数据权限，`set_len` 必然 ERROR_ACCESS_DENIED（详见 translate.rs
+/// 里同一个坑的记录）。另开一个只写句柄才行。
+fn truncate_log(path: &std::path::Path) {
+    if let Ok(file) = std::fs::OpenOptions::new().write(true).open(path) {
+        let _ = file.set_len(0);
+    }
+}
 
 fn log_err(message: &str) {
     // 先写文件再写 stderr：stderr 失败不应阻止文件日志写入
@@ -224,22 +239,42 @@ fn log_err(message: &str) {
                 .or_else(dirs::home_dir);
             if let Some(dir) = dir {
                 let _ = std::fs::create_dir_all(&dir);
+                let path = dir.join("webrtc.err.log");
                 if let Ok(f) = std::fs::OpenOptions::new()
                     .create(true)
                     .append(true)
-                    .open(dir.join("webrtc.err.log"))
+                    .open(&path)
                 {
-                    *guard = Some(f);
+                    let len = f.metadata().map(|meta| meta.len()).unwrap_or(0);
+                    *guard = Some((f, len));
+                    // 记一下路径，超限时要用它另开句柄截断
+                    LOG_PATH
+                        .lock()
+                        .ok()
+                        .and_then(|mut slot| slot.replace(path).map(drop));
                 }
             }
         }
-        if let Some(file) = guard.as_mut() {
-            let _ = file.write_all(format!("{}\n", message).as_bytes());
+        if let Some((file, len)) = guard.as_mut() {
+            if *len > LOG_MAX_BYTES {
+                if let Ok(Some(path)) = LOG_PATH.lock().map(|slot| slot.clone()) {
+                    truncate_log(&path);
+                }
+                *len = 0;
+            }
+            let line = format!("{}\n", message);
+            if file.write_all(line.as_bytes()).is_ok() {
+                *len += line.len() as u64;
+            }
         }
     }
     // stderr 写失败也不 panic：release 版可能根本没控制台
     let _ = writeln!(std::io::stderr(), "[WeTube] {message}");
 }
+
+/// 日志文件路径（轮转时要用，见 [`truncate_log`]）。
+static LOG_PATH: std::sync::Mutex<Option<std::path::PathBuf>> =
+    std::sync::Mutex::new(None);
 
 /// 终止类信号处理器：清掉 yt-dlp 子进程后按信号的默认语义退出。
 ///
@@ -249,8 +284,11 @@ fn log_err(message: &str) {
 #[cfg(unix)]
 extern "C" fn handle_exit_signal(sig: i32) {
     download::kill_all_best_effort();
-    // _exit 是异步信号安全的立即退出；退出码 128+sig 与 shell 惯例一致。
-    std::process::exit(128 + sig);
+    // 必须是 libc::_exit：它才是异步信号安全的立即退出。
+    // std::process::exit 会跑 atexit 并 flush stdio，信号恰好落在 log_err
+    // （正持有 LOG_FILE 的 Mutex）或下载锁的持有期时会死锁在退出路径上。
+    // 退出码 128+sig 与 shell 惯例一致。
+    unsafe { libc::_exit(128 + sig) };
 }
 
 /// 翻译链路日志统一由 translate 模块提供（写入应用数据目录下的 WeTube/translate.log，
@@ -272,6 +310,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     let mut store = ConfigStore::load()?;
+    // 配置文件解析不出来又没备份可救：这时所有改动都会写不进去（save 拒绝
+    // 落盘，避免把清空后的空配置盖到用户文件上）。不吭声的话用户只会觉得
+    // "改了设置没反应"，所以启动时先把原因记进日志。
+    if store.is_corrupt() {
+        log_err("配置文件 settings.json 已损坏且备份不可用，本次设置改动不会被保存");
+    }
     let init_script = init_script();
 
     let event_loop = EventLoopBuilder::<Command>::with_user_event().build();
@@ -369,7 +413,15 @@ fn main() -> Result<(), Box<dyn Error>> {
         let wk = webview.webview();
         native_audio::NativeAudio::new(&*wk as *const _ as *mut std::ffi::c_void, event_loop.create_proxy())
     };
+    // 后台预热内嵌工具（yt-dlp / ffmpeg / qjs）。ffmpeg 解压后近百 MB，
+    // 拖到第一次点下载时才做的话，解压会卡在主线程上，界面冻住好几秒。
+    download::warmup();
+
     let mut download_history = download::EventHistory::default();
+    // 上一次推给页面的最大化状态。双击标题栏、Win+↑、贴边、绿色按钮这些
+    // 系统路径都不经过 act("window-toggle-maximize")，只能靠 Resized 反推，
+    // 否则标题栏那个按钮的图标会长期停在「最大化」。
+    let mut last_maximized: Option<bool> = None;
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
 
@@ -397,6 +449,13 @@ fn main() -> Result<(), Box<dyn Error>> {
                 if window.fullscreen().is_none() {
                     eval(&webview, "window.__wetubeExitElementFullscreen?.()");
                 }
+
+                // 最大化状态变了才推给页面，让标题栏换图标/提示（见 src/titlebar.js）。
+                let maximized = window.is_maximized();
+                if last_maximized != Some(maximized) {
+                    last_maximized = Some(maximized);
+                    eval(&webview, &format!("window.__wetubeSetMaximized?.({maximized})"));
+                }
             }
             Event::WindowEvent {
                 event: WindowEvent::CloseRequested,
@@ -412,6 +471,12 @@ fn main() -> Result<(), Box<dyn Error>> {
             Event::UserEvent(Command::Ipc(msg, trusted)) => {
                 debug_log(&format!("指令来源: 页面 IPC → {msg:?}"));
                 if let Some(url) = msg.strip_prefix("open:") {
+                    // 与其他三个出口（导航、新窗口、external）保持同一套白名单：
+                    // 不校验的话页面只要发 `open:file://...exe` 就能借 ShellExecute 拉起本机程序。
+                    if !is_openable_external(url) {
+                        log_err(&format!("拒绝打开非 http(s) 链接: {url}"));
+                        return;
+                    }
                     if let Err(err) = open::that(url) {
                         log_err(&format!("打开外部链接失败: {err}"));
                     }
@@ -586,7 +651,9 @@ fn handle_panel_message(
                     .and_then(Value::as_array)
                     .map(|list| {
                         list.iter()
-                            .map(|value| value.as_str().unwrap_or_default().to_string())
+                            // 非字符串（数字、null、拼错的对象）不能再被当成空串送去翻译，
+                            // 否则页面会收到"翻译成功但一片空白"。原样跳过，位置由 null 占位。
+                            .map(|value| value.as_str().map(str::to_string))
                             .collect::<Vec<_>>()
                     }),
             ) else {
@@ -664,6 +731,11 @@ fn handle_panel_message(
         // 结果经 proxy 送回主线程再 eval，绝不卡事件循环。
         Some("download:probe") => {
             let Some(url) = payload.get("url").and_then(Value::as_str) else {
+                // 缺参数必须回一条 fail，否则页面那条请求永远停在「探测中」，
+                // 既不能重试也取消不掉。
+                let _ = proxy.send_event(Command::DownloadEvent(
+                    serde_json::json!({ "kind": "probe-fail", "url": "", "error": "缺少 url 参数" }),
+                ));
                 return;
             };
             let url = url.to_string();
@@ -698,6 +770,13 @@ fn handle_panel_message(
                 payload.get("url").and_then(Value::as_str),
                 payload.get("mode").and_then(Value::as_str),
             ) else {
+                // 同上：缺 url / mode 也要把 fail 送回去，带上 requestId 让页面能定位卡片。
+                let _ = proxy.send_event(Command::DownloadEvent(
+                    serde_json::json!({
+                        "kind": "fail", "id": 0, "requestId": request_id,
+                        "detail": "缺少 url 或 mode 参数",
+                    }),
+                ));
                 return;
             };
             let format_id = payload
@@ -791,6 +870,7 @@ fn handle_panel_message(
                 },
                 {
                     let proxy = proxy.clone();
+                    let request_id = request_id.clone();
                     move |id, ok, detail| {
                         let kind = if ok { "done" } else { "fail" };
                         let _ = proxy.send_event(Command::DownloadEvent(
@@ -798,20 +878,25 @@ fn handle_panel_message(
                                 "kind": kind,
                                 "id": id,
                                 "detail": detail,
+                                "requestId": request_id,
                             }),
                         ));
                     }
                 },
-                // 取消回调：cleanup 线程在检测到我们取消时调用
-                // 发 fail 事件带"已取消"，前端状态守卫确保不会覆盖已收到的 cancelled 事件
+                // 取消回调：cleanup 线程在检测到我们取消时调用。
+                // `cancelled: true` 是给前端的判断依据（别再拿中文串比对，
+                // 改文案或做 i18n 时取消就会被当成失败），detail 只用于展示。
                 {
                     let proxy = proxy.clone();
+                    let request_id = request_id.clone();
                     move |id| {
                         let _ = proxy.send_event(Command::DownloadEvent(
                             serde_json::json!({
                                 "kind": "fail",
                                 "id": id,
                                 "detail": "已取消",
+                                "cancelled": true,
+                                "requestId": request_id,
                             }),
                         ));
                     }
@@ -827,7 +912,14 @@ fn handle_panel_message(
         }
         Some("download:cancel") => {
             if let Some(id) = payload.get("id").and_then(Value::as_u64) {
-                let killed = download::cancel(id as u32);
+                // 任务 id 是 u32，直接 `as u32` 会把超范围的值静默截断、杀错任务。
+                let killed = match u32::try_from(id) {
+                    Ok(id) => download::cancel(id),
+                    Err(_) => {
+                        log_err(&format!("取消下载失败：id 超出范围 {id}"));
+                        false
+                    }
+                };
                 let _ = proxy.send_event(Command::DownloadEvent(
                     serde_json::json!({ "kind": "cancelled", "id": id, "killed": killed }),
                 ));
@@ -1039,6 +1131,13 @@ fn act(webview: &WebView, window: &Window, action: &str) {
         }
         "open-external" => eval(webview, "window.ipc.postMessage('open:'+location.href)"),
         "settings" => eval(webview, "window.__YTE?.togglePanel?.()"),
+        // 「帮助 → 项目主页」。macOS 走原生菜单事件，Windows/Linux 的 HTML 菜单
+        // 发的是 IPC 裸串，必须在这里也接住，否则点了没反应。
+        "project" => {
+            if let Err(err) = open::that(PROJECT_URL) {
+                log_err(&format!("打开项目主页失败: {err}"));
+            }
+        }
         // 菜单事件走 menu 分支，键盘快捷键走这里，两边都能开。
         "shortcuts" => eval(webview, "window.__wetubeToggleShortcutPanel?.()"),
         "fullscreen" => {
@@ -1109,9 +1208,9 @@ fn act(webview: &WebView, window: &Window, action: &str) {
             window.set_maximized(!window.is_maximized());
         }
         // 前端在标题栏拖动区按下时发来，由系统接管窗口拖动。
-        // 只有 Windows 需要这条：macOS 的 WKWebView 认 `-webkit-app-region: drag`，
-        // 前端也只在 Windows 下才发这条指令（见 src/titlebar.js）。
-        #[cfg(target_os = "windows")]
+        // macOS 不需要：那里保留原生标题栏（红绿黄交通灯那一条本身就能拖）。
+        // Windows / Linux 都走了 with_decorations(false)，没有这条窗口就拖不动。
+        #[cfg(not(target_os = "macos"))]
         "window-drag" => start_window_drag(window),
         other => {
             if other != "window-drag" {

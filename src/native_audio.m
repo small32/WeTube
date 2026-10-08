@@ -18,9 +18,12 @@ typedef struct {
     _Atomic(uint64_t) callbacks;
     _Atomic(bool) badLayout;
     _Atomic(float) inputPeak, outputPeak;
-    float rampGain;
-    UInt32 tapBuffers;
-    double sampleRate;
+    // 这三个由 IO 线程（renderAudio）和串行队列（start）同时读写，
+    // 必须是原子的：靠 AudioDeviceStop/Start 的先后顺序"碰巧没问题"不算数，
+    // 按 C11 内存模型就是数据竞争（TSan 会报）。
+    _Atomic(float) rampGain;
+    _Atomic(UInt32) tapBuffers;
+    _Atomic(double) sampleRate;
 } WTRender;
 
 static AudioObjectPropertyAddress address(AudioObjectPropertySelector selector, AudioObjectPropertyScope scope) {
@@ -48,35 +51,40 @@ static OSStatus renderAudio(AudioObjectID device, const AudioTimeStamp *now,
     (void)device; (void)now; (void)inputTime; (void)outputTime;
     WTRender *r = context;
     if (!output) return noErr;
+    // 这三个字段由串行队列（start）写、IO 线程（本回调）读：各取一次到本地，
+    // 既省掉重复原子读，也保证一整帧里看到的是同一份配置。
+    UInt32 tapBuffers = atomic_load_explicit(&r->tapBuffers, memory_order_relaxed);
+    double sampleRate = atomic_load_explicit(&r->sampleRate, memory_order_relaxed);
+    float rampGain = atomic_load_explicit(&r->rampGain, memory_order_relaxed);
     atomic_fetch_add_explicit(&r->callbacks, 1, memory_order_relaxed);
     for (UInt32 b = 0; b < output->mNumberBuffers; b++)
         if (output->mBuffers[b].mData) memset(output->mBuffers[b].mData, 0, output->mBuffers[b].mDataByteSize);
-    if (!input || input->mNumberBuffers < r->tapBuffers || !output->mNumberBuffers) return noErr;
+    if (!input || input->mNumberBuffers < tapBuffers || !output->mNumberBuffers) return noErr;
     // Duplex devices donate hardware input streams ahead of the tap; never read those.
-    UInt32 first = input->mNumberBuffers - r->tapBuffers;
+    UInt32 first = input->mNumberBuffers - tapBuffers;
     const AudioBuffer *left = &input->mBuffers[first];
-    const AudioBuffer *right = r->tapBuffers == 2 ? &input->mBuffers[first + 1] : left;
+    const AudioBuffer *right = tapBuffers == 2 ? &input->mBuffers[first + 1] : left;
     if (!left->mData || !right->mData) return noErr;
-    if ((r->tapBuffers == 1 && left->mNumberChannels != 2)
-        || (r->tapBuffers == 2 && (left->mNumberChannels != 1 || right->mNumberChannels != 1))) {
+    if ((tapBuffers == 1 && left->mNumberChannels != 2)
+        || (tapBuffers == 2 && (left->mNumberChannels != 1 || right->mNumberChannels != 1))) {
         atomic_store_explicit(&r->badLayout, true, memory_order_relaxed); return noErr;
     }
     UInt32 frames = left->mDataByteSize / (sizeof(float) * left->mNumberChannels);
-    if (r->tapBuffers == 2) frames = MIN(frames, right->mDataByteSize / sizeof(float));
+    if (tapBuffers == 2) frames = MIN(frames, right->mDataByteSize / sizeof(float));
     bool armed = atomic_load_explicit(&r->armed, memory_order_relaxed), received = false;
     float gain = atomic_load_explicit(&r->gain, memory_order_relaxed);
     float inputPeak = 0, outputPeak = 0;
-    float step = (gain - r->rampGain) / fmaxf(1, (float)(r->sampleRate * 0.01));
+    float step = (gain - rampGain) / fmaxf(1, (float)(sampleRate * 0.01));
     for (UInt32 frame = 0; frame < frames; frame++) {
         float l = ((float *)left->mData)[frame * left->mNumberChannels];
-        float rr = ((float *)right->mData)[frame * right->mNumberChannels + (r->tapBuffers == 1 ? 1 : 0)];
+        float rr = ((float *)right->mData)[frame * right->mNumberChannels + (tapBuffers == 1 ? 1 : 0)];
         if ((isfinite(l) && fabsf(l) > 1e-7f) || (isfinite(rr) && fabsf(rr) > 1e-7f)) received = true;
         if (isfinite(l)) inputPeak = fmaxf(inputPeak, fabsf(l));
         if (isfinite(rr)) inputPeak = fmaxf(inputPeak, fabsf(rr));
         if (!armed) continue; // Probe while original output remains audible.
-        if ((step >= 0 && r->rampGain < gain) || (step < 0 && r->rampGain > gain)) {
-            r->rampGain += step;
-            if ((step > 0 && r->rampGain > gain) || (step < 0 && r->rampGain < gain)) r->rampGain = gain;
+        if ((step >= 0 && rampGain < gain) || (step < 0 && rampGain > gain)) {
+            rampGain += step;
+            if ((step > 0 && rampGain > gain) || (step < 0 && rampGain < gain)) rampGain = gain;
         }
         UInt32 channel = 0;
         for (UInt32 b = 0; b < output->mNumberBuffers; b++) {
@@ -86,12 +94,13 @@ static OSStatus renderAudio(AudioObjectID device, const AudioTimeStamp *now,
                 if (!out->mData || frame >= available || channel > 1) continue;
                 float value = channel == 0 ? l : rr;
                 if (output->mNumberBuffers == 1 && out->mNumberChannels == 1) value = (l + rr) * .5f;
-                float amplified = wetube_audio_sample(value, r->rampGain);
+                float amplified = wetube_audio_sample(value, rampGain);
                 ((float *)out->mData)[frame * out->mNumberChannels + c] = amplified;
                 outputPeak = fmaxf(outputPeak, fabsf(amplified));
             }
         }
     }
+    atomic_store_explicit(&r->rampGain, rampGain, memory_order_relaxed);
     if (received) atomic_store_explicit(&r->samples, true, memory_order_relaxed);
     atomic_store_explicit(&r->inputPeak, inputPeak, memory_order_relaxed);
     atomic_store_explicit(&r->outputPeak, outputPeak, memory_order_relaxed);
@@ -110,6 +119,9 @@ static OSStatus renderAudio(AudioObjectID device, const AudioTimeStamp *now,
     NSObject *_description; // Only cast to CATapDescription inside the 14.2 guard.
     NSArray<NSNumber *> *_targets;
     NSString *_lastState, *_failedRequest;
+    // 失败节流用：同一个 request 失败后隔一会儿允许再试，避免永久锁死。
+    NSDate *_failedAt;
+    NSUInteger _failCount;
     WTRender _render;
     NSDate *_started;
     uint64_t _lastCallbacks;
@@ -163,7 +175,8 @@ static OSStatus renderAudio(AudioObjectID device, const AudioTimeStamp *now,
     _description = nil; _targets = nil; _started = nil; _output = 0;
 }
 - (void)fail:(NSString *)error request:(NSString *)request {
-    [self stop]; _failedRequest = request;
+    [self stop];
+    _failedRequest = request; _failedAt = NSDate.date; _failCount++;
     [self publish:@"error" request:request error:error];
 }
 - (OSStatus)start:(NSArray<NSNumber *> *)targets output:(AudioObjectID)output {
@@ -264,8 +277,19 @@ static OSStatus renderAudio(AudioObjectID device, const AudioTimeStamp *now,
     dispatch_async(_queue, ^{
         @autoreleasepool {
             if (revision != atomic_load(&self->_revision)) return;
-            if (!wanted) { [self stop]; self->_failedRequest = nil; [self publish:@"off" request:request error:nil]; return; }
-            if ([self->_failedRequest isEqual:request]) return;
+            // shutdown 可能在入队之后才发生，块里必须再看一次，
+            // 否则会在已经 shutdown 之后重建 tap 和私有聚合设备且永不销毁。
+            if (self->_shutdown) return;
+            if (!wanted) { [self stop]; self->_failedRequest = nil; self->_failCount = 0; [self publish:@"off" request:request error:nil]; return; }
+            if ([self->_failedRequest isEqual:request]) {
+                // 同一个请求失败过：节流重试，而不是一次失败就永久锁死。
+                // 首次开启时系统往往会弹「允许录制系统音频」，用户还没点允许，
+                // 3 秒拿不到数据就判失败并锁死的话，授权之后 UI 也一直停在 error，
+                // 必须关掉再点开才恢复。
+                NSTimeInterval since = -[self->_failedAt timeIntervalSinceNow];
+                if (self->_failedAt && since < 5.0) return;
+                if (self->_failCount >= 8) return;
+            }
             if (@available(macOS 14.2, *)) {} else { [self fail:@"原生音量增强需要 macOS 14.2 或更新版本" request:request]; return; }
             if (!pids.count) { [self stop]; [self publish:@"waiting" request:request error:@"等待播放器音频进程"]; return; }
             NSMutableArray<NSNumber *> *targets = [NSMutableArray array];
@@ -319,6 +343,7 @@ static OSStatus renderAudio(AudioObjectID device, const AudioTimeStamp *now,
                 }
             }
             bool active = atomic_load(&self->_render.armed);
+            if (active) { self->_failedRequest = nil; self->_failedAt = nil; self->_failCount = 0; }
             NSString *hint = [self->_started timeIntervalSinceNow] < -5
                 ? @"尚未收到音频；请播放有声音的视频，并检查系统设置中的系统音频录制权限"
                 : @"等待音频或系统授权；原声保持播放";
@@ -338,6 +363,13 @@ static OSStatus renderAudio(AudioObjectID device, const AudioTimeStamp *now,
     values[0] = atomic_load(&_render.inputPeak);
     values[1] = atomic_load(&_render.outputPeak);
     values[2] = atomic_load(&_render.armed) ? 1 : 0;
+}
+// 兜底：万一没走 shutdown 就被释放，也要停掉定时器，
+// 别让已经关掉的引擎继续在队列上重建聚合设备。
+- (void)dealloc {
+    if (_shutdown) return;
+    _shutdown = true;
+    if (_timer) { dispatch_source_cancel(_timer); _timer = nil; }
 }
 @end
 

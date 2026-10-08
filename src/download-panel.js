@@ -535,6 +535,7 @@
           if (entry3) tasks.delete(key);
           t.id = event.id;
           t.url = event.url;
+          t._pct = 0; // 进度单调的起点，卡片复用时必须重置
           t.state = "running";
           t.cancel.style.display = "";
           t.cancel.onclick = () => send({ type: "download:cancel", id: event.id });
@@ -547,10 +548,25 @@
         const t = tasks.get(`task:${event.id}`);
         if (!t) break;
         const p = event.progress || {};
-        const percent = Number.parseFloat(String(p.percent).trim());
-        t.fill.style.width = Number.isFinite(percent)
-          ? `${Math.max(0, Math.min(100, percent))}%`
-          : "50%"; // unknown 时给个中间值动效
+        const parsed = Number.parseFloat(String(p.percent).trim());
+        // 音视频分离的格式 yt-dlp 会分两条流各报一轮 0→100（Rust 侧已按字节
+        // 聚合，这里再兜一层）：进度条只许往前走，否则会到顶后跳回 0，
+        // 看起来像"下完了又重来"或"卡死"。
+        //
+        // 只有落在 0~100 这个正常区间里的值才纳入单调基准；越界值（-2%、
+        // 120%）和不可解析的（NA）按原来的 clamp/占位处理，不写基准——
+        // 否则一个异常值就会把进度条永久钉住。
+        let percent = 50; // unknown 时给个中间值动效
+        if (Number.isFinite(parsed)) {
+          const clamped = Math.max(0, Math.min(100, parsed));
+          if (clamped === parsed) {
+            percent = Math.max(t._pct || 0, clamped);
+            t._pct = percent;
+          } else {
+            percent = clamped;
+          }
+        }
+        t.fill.style.width = `${percent}%`;
         t.left.textContent = `${p.percent || ""}  ${p.speed || ""}${p.eta ? ` · 剩余 ${p.eta}` : ""}`;
         break;
       }
@@ -564,6 +580,7 @@
         t.fill.style.width = "100%";
         t.left.textContent = event.detail ? `已保存：${event.detail}` : "完成";
         t.cancel.style.display = "none";
+        pruneFinished();
         window.__wetubeDlRefreshBadge?.();
         break;
       }
@@ -572,9 +589,12 @@
         if (!t) break;
         // 终态守卫：仅忽略终态，允许覆盖 cancelled 中间状态
         if (t.state === "done" || t.state === "failed") break;
+        // 取消与否看布尔字段，不靠中文文案比对——改文案或做 i18n 时
+        // 取消就会被显示成"失败"。detail 只用于展示。
+        const isCancelled = event.cancelled === true || event.detail === "已取消";
         t.state = "failed";
-        t.left.textContent = event.detail === "已取消" ? "已取消" : "失败";
-        if (event.detail && event.detail !== "已取消") {
+        t.left.textContent = isCancelled ? "已取消" : "失败";
+        if (event.detail && !isCancelled) {
           let err = t.el.querySelector(".t-err");
           if (!err) {
             err = document.createElement("div");
@@ -584,6 +604,7 @@
           err.textContent = event.detail;
         }
         t.cancel.style.display = "none";
+        pruneFinished();
         window.__wetubeDlRefreshBadge?.();
         break;
       }
@@ -604,6 +625,24 @@
       }
     }
   };
+
+  /* 终态卡片只留最近这些条。
+   *
+   * 以前完成一个就永久多一个 DOM 节点和 Map 条目，长会话下只增不减——
+   * 悬浮球角标为了绕开它还不得不自己数一遍活跃任务。 */
+  const MAX_FINISHED_CARDS = 40;
+  function pruneFinished() {
+    const finished = [...tasks.entries()]
+      .filter(([, t]) => t.state === "done" || t.state === "failed")
+      .map(([key]) => key);
+    const overflow = finished.length - MAX_FINISHED_CARDS;
+    if (overflow <= 0) return;
+    for (const key of finished.slice(0, overflow)) {
+      const t = tasks.get(key);
+      t?.el?.remove();
+      tasks.delete(key);
+    }
+  }
 
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", mount, { once: true });

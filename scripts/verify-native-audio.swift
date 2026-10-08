@@ -80,7 +80,9 @@ class Receiver: NSObject, WKScriptMessageHandler {
                 if self.finished { return }
                 var values: [Float] = [0,0,0]; audioMetrics(self.engine, &values)
                 let ratio = Double(values[1] / max(values[0], 1e-10))
-                let expected = pow(10.0, (self.phase == 0 ? 6.0 : 12.0) / 20.0)
+                // 实现是固定 5 dB（见 native_audio.rs 的 GAIN_DB），amount 不参与计算。
+                // 这里写死 6/12 dB 的话脚本必然失败。
+                let expected = pow(10.0, BOOST_DB / 20.0)
                 if let peak = expectedSourcePeak, abs(Double(values[0]) - peak) > peak * 0.2 {
                     self.finish(["ok":false,"message":"捕获音频与测试源幅度不一致","inputPeak":values[0],"expectedPeak":peak]); return
                 }
@@ -97,11 +99,14 @@ class Receiver: NSObject, WKScriptMessageHandler {
             if values[2] != 0 { finish(["ok":false,"message":"关闭后仍接管原声"]); return }
             if phase == 0 {
                 phase = 1
-                web.evaluateJavaScript("config.amount=12; document.querySelector('.yte-volume-boost-btn').click();", completionHandler:nil)
-            } else { finish(["ok":true,"result":"MSE 原生增强及关闭恢复","gain6dB":ratios[0],"gain12dB":ratios[1],"inputPeaks":inputPeaks]); }
+                web.evaluateJavaScript("document.querySelector('.yte-volume-boost-btn').click();", completionHandler:nil)
+            } else { finish(["ok":true,"result":"MSE 原生增强及关闭恢复","gainPhase0":ratios[0],"gainPhase1":ratios[1],"inputPeaks":inputPeaks]); }
         }
     }
 }
+// 与 src/native_audio.rs 的 GAIN_DB 保持一致
+let BOOST_DB: Double = 5.0
+
 let app = NSApplication.shared
 app.setActivationPolicy(.regular)
 let config = WKWebViewConfiguration()

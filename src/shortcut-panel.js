@@ -18,6 +18,7 @@
 	window.__wetubeShortcutPanelMounted = true;
 
 	const PANEL_ID = "wetube-shortcut-panel";
+	const SHORTCUT_STYLE_ID = "wetube-shortcut-panel-style";
 	const isMac = window.__WETUBE_PLATFORM__ === "macos";
 
 	/** 注册表快照。Rust 每次改完会整体推过来一份新的。 */
@@ -283,9 +284,14 @@
 	function mount() {
 		if (document.getElementById(PANEL_ID)) return;
 
-		const style = document.createElement("style");
-		style.textContent = CSS;
-		(document.head || document.documentElement).appendChild(style);
+		// 样式只注入一次：以前每次 mount 都往 <head> 追加一个无 id 的 <style>，
+		// close() 又从不移除，开关 N 次就攒 N 份重复 CSS。
+		if (!document.getElementById(SHORTCUT_STYLE_ID)) {
+			const style = document.createElement("style");
+			style.id = SHORTCUT_STYLE_ID;
+			style.textContent = CSS;
+			(document.head || document.documentElement).appendChild(style);
+		}
 
 		backdrop = el("div", { id: `${PANEL_ID}-backdrop` });
 		backdrop.addEventListener("click", close);
@@ -317,6 +323,9 @@
 
 	function close() {
 		stopCapture();
+		// mount() 里挂的是 window 级捕获监听，只 remove() 掉 DOM 的话
+		// 每次开合都会再叠一层，关得越多重复触发越多。
+		window.removeEventListener("keydown", onCaptureKeyDown, true);
 		if (backdrop) backdrop.remove();
 		if (root) root.remove();
 		backdrop = null;

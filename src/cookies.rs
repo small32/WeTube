@@ -175,12 +175,25 @@ mod imp {
     /// 用这个地址查能把父域 cookie 一并带出来。
     const COOKIE_URI: &str = "https://www.youtube.com";
 
+    // COM 约定：out 形式的字符串由调用方用 CoTaskMemFree 释放。
+    // 这里只用到这一个函数，不值得为它给 windows crate 开一整个 feature，
+    // 直接声明 ole32 的入口即可。
+    #[link(name = "ole32")]
+    unsafe extern "system" {
+        fn CoTaskMemFree(pv: *const std::ffi::c_void);
+    }
+
+    /// 读走 PWSTR 的内容并**释放它占用的 COM 内存**。
+    ///
+    /// 每个 cookie 要读 Name / Value / Domain / Path 四个字符串，之前一个都不
+    /// 释放——导出发生在启动、每次探测、每次下载开始时，会话久了会稳定泄漏。
     fn pwstr_to_string(ptr: PWSTR) -> String {
         if ptr.is_null() {
-            String::new()
-        } else {
-            unsafe { ptr.to_string() }.unwrap_or_default()
+            return String::new();
         }
+        let text = unsafe { ptr.to_string() }.unwrap_or_default();
+        unsafe { CoTaskMemFree(ptr.as_ptr() as *const std::ffi::c_void) };
+        text
     }
 
     /// 一条 cookie 转成 Netscape 格式的一行（Tab 分隔）。

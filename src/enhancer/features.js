@@ -456,20 +456,35 @@
 		disable: () => unwatchMutations(F.shareShortener),
 	};
 
-	// 跳过「继续观看」：把 YouTube 的续播回调替换成空函数
+	// 跳过「继续观看」：把 YouTube 的续播回调替换成空函数。
+	//
+	// 回调名以 `youtubeDataChanged_` 为准（原写成 youthereDataChanged_，
+	// 拼错的版本永远不存在，于是 enable 只是凭空挂了个没人调的空函数，
+	// 功能静默失效）。探测两个拼写，取真正存在的那个。
+	const CONTINUE_WATCHING_HOOKS = ["youtubeDataChanged_", "youthereDataChanged_"];
+
 	F.skipContinueWatching = {
 		enable() {
 			const el = document.querySelector("ytd-watch-grid, ytd-watch-flexy");
 			if (!el) return;
-			F.skipContinueWatching.original = el.youthereDataChanged_;
-			el.youthereDataChanged_ = () => {};
+			const hook = CONTINUE_WATCHING_HOOKS.find((name) => typeof el[name] === "function");
+			if (!hook) {
+				console.warn("[WeTube] skipContinueWatching：没找到续播回调，YouTube 可能改版了");
+				return;
+			}
+			F.skipContinueWatching.hook = hook;
+			F.skipContinueWatching.original = el[hook];
+			el[hook] = () => {};
 		},
 		disable() {
 			const el = document.querySelector("ytd-watch-grid, ytd-watch-flexy");
 			if (!el) return;
-			const original = F.skipContinueWatching.original;
-			if (original) el.youthereDataChanged_ = original;
-			else delete el.youthereDataChanged_;
+			const { hook, original } = F.skipContinueWatching;
+			if (!hook) return;
+			if (original) el[hook] = original;
+			else delete el[hook];
+			F.skipContinueWatching.hook = null;
+			F.skipContinueWatching.original = null;
 		},
 	};
 
@@ -573,17 +588,20 @@
 	};
 
 	// 悬停展开播放器设置菜单
+	// hideTimer 必须放在功能对象上：它是闭包局部变量时 disable() 够不着，
+	// 关掉功能后那个 50ms 定时器仍会点一次齿轮、弹出设置菜单。
+	let settingsHoverHideTimer = null;
+
 	F.openYouTubeSettingsOnHover = {
 		enable() {
 			const button = document.querySelector("button.ytp-settings-button");
 			if (!button) return;
-			let hideTimer = null;
 			const open = () => {
-				clearTimeout(hideTimer);
+				clearTimeout(settingsHoverHideTimer);
 				if (!document.querySelector("div.ytp-settings-menu")) button.click();
 			};
 			const close = () => {
-				hideTimer = setTimeout(() => {
+				settingsHoverHideTimer = setTimeout(() => {
 					if (document.querySelector("div.ytp-settings-menu")) button.click();
 				}, 50);
 			};
@@ -591,16 +609,25 @@
 			on(button, "mouseleave", close, "openYouTubeSettingsOnHover");
 			on(document, "mouseover", (event) => {
 				if (event.target?.closest?.("div.ytp-settings-menu")) {
-					clearTimeout(hideTimer);
+					clearTimeout(settingsHoverHideTimer);
 				}
 			}, "openYouTubeSettingsOnHover");
 		},
-		disable: () => off("openYouTubeSettingsOnHover"),
+		disable: () => {
+			clearTimeout(settingsHoverHideTimer);
+			settingsHoverHideTimer = null;
+			off("openYouTubeSettingsOnHover");
+		},
 	};
 
 	// ---------------------------------------------------------------- 播放控制
 
 	// 默认播放速度（可按频道覆盖）
+	// speedApplied 记录"这次是不是我们设的倍速"：原来 enable 在 1x 时什么都不做，
+	// disable 却无条件复位成 1x，于是开着这个功能、用户手动调到 2x 后，
+	// 任何一次导航都会被强行打回 1x。
+	let speedApplied = false;
+
 	F.playerSpeed = {
 		enable: async ({ speed, channelSpeeds } = {}) => {
 			const data = await videoData();
@@ -608,14 +635,22 @@
 			const perChannel = parseChannelSpeeds(channelSpeeds);
 			const channelId = data.author?.channel_id ?? data.channelId;
 			const target = perChannel[channelId] ?? speed ?? 1;
-			if (!target || target === 1) return;
+			const numeric = Number(target);
+			if (!Number.isFinite(numeric) || numeric === 1) {
+				speedApplied = false;
+				return;
+			}
 			const player = await waitForPlayer();
 			if (!player) return;
-			await player.setPlaybackRate?.(clamp(Number(target), 0.25, 16));
+			const rate = clamp(numeric, 0.25, 16);
+			await player.setPlaybackRate?.(rate);
 			const video = player.querySelector("video");
-			if (video) video.playbackRate = clamp(Number(target), 0.25, 16);
+			if (video) video.playbackRate = rate;
+			speedApplied = true;
 		},
 		disable: async () => {
+			if (!speedApplied) return;
+			speedApplied = false;
 			const player = getPlayer();
 			if (!player) return;
 			await player.setPlaybackRate?.(1);
@@ -681,26 +716,36 @@
 	// 固定音量
 	let originalVolume = null;
 
+	// 原来写成 `void withPlayer(...)`：返回 undefined，runtime 的 await 立刻结束，
+	// enable/disable 两个 withPlayer 循环并发跑，setVolume 的先后顺序没保障
+	// （关掉再打开可能停在旧音量）。返回 Promise 让调用方能真正等到做完。
 	F.globalVolume = {
 		enable: ({ volume } = {}) =>
-			void withPlayer(async (player) => {
+			withPlayer(async (player) => {
 				if (!player.setVolume) return;
 				if (originalVolume === null) originalVolume = await player.getVolume?.();
 				await player.setVolume(clamp(Number(volume) || 0, 0, 100));
 				if (await player.isMuted?.()) await player.unMute?.();
 			}),
 		disable: () =>
-			void withPlayer(async (player) => {
+			withPlayer(async (player) => {
 				if (originalVolume !== null) await player.setVolume?.(originalVolume);
 				originalVolume = null;
 			}),
 	};
 
 	// 记住音量（普通视频和 Shorts 分开记）
-	const volumeState = () => ({
-		watch: Number(localStorage.getItem("yte-volume-watch") ?? 0),
-		shorts: Number(localStorage.getItem("yte-volume-shorts") ?? 0),
-	});
+	//
+	// 没存过要返回 null 而不是 0：0 是"用户把音量调到了静音"这个合法值，
+	// 混在一起会让首次启用时把音量直接压成 0（而原来 `if (target)` 的假值
+	// 判断又让真正的静音永远恢复不出来——两边都错）。
+	const volumeState = () => {
+		const read = (key) => {
+			const raw = localStorage.getItem(key);
+			return raw === null ? null : Number(raw);
+		};
+		return { watch: read("yte-volume-watch"), shorts: read("yte-volume-shorts") };
+	};
 
 	F.rememberVolume = {
 		enable: async () => {
@@ -708,7 +753,7 @@
 			if (!player?.setVolume) return;
 			const saved = volumeState();
 			const target = YTE.pageType() === "shorts" ? saved.shorts : saved.watch;
-			if (target) await player.setVolume(clamp(target, 0, 100));
+			if (Number.isFinite(target)) await player.setVolume(clamp(target, 0, 100));
 
 			const video = player.querySelector("video");
 			if (!video) return;
@@ -729,6 +774,13 @@
 	const wheelHost = (player) => document.querySelector("div#player") ?? player;
 	const wheelOnSettingsMenu = (event) => Boolean(event.target?.closest?.("div.ytp-settings-menu"));
 
+	// 倍速滚轮当前用的修饰键（没开启时为 null）。
+	//
+	// 两个滚轮功能挂在同一宿主上、都 preventDefault 且都会执行：音量那个默认
+	// 不需要修饰键，于是按住 Alt 滚一下会同时改音量和倍速。音量这边看到
+	// 倍速的修饰键正被按下就让路。
+	let speedWheelModifier = null;
+
 	// 滚轮调音量
 	F.scrollWheelVolumeControl = {
 		enable: async (config = {}) => {
@@ -743,6 +795,14 @@
 				if (holdModifierKey && !event[modifierKey]) return;
 				if (holdRightClick && event.buttons !== 2) return;
 				if (wheelOnSettingsMenu(event)) return;
+				// 倍速滚轮正要接这一下（它的修饰键被按住）就让给它，别同时改两个。
+				if (
+					speedWheelModifier &&
+					event[speedWheelModifier] &&
+					(!holdModifierKey || modifierKey !== speedWheelModifier)
+				) {
+					return;
+				}
 				event.preventDefault();
 				const current = (await player.getVolume?.()) ?? 0;
 				const delta = (event.deltaY < 0 ? 1 : -1) * Number(steps);
@@ -764,6 +824,7 @@
 			const player = await waitForPlayer();
 			if (!player) return;
 			const { modifierKey = "altKey" } = config;
+			speedWheelModifier = modifierKey;
 			// 同 scrollWheelVolumeControl：steps 为 0 会让 `Math.round(x / 0) * 0` 变成 NaN，
 			// 而 video.playbackRate = NaN 会抛 TypeError（WebIDL 的受限 double）。
 			const steps = Number(config.steps) > 0 ? Number(config.steps) : 0.25;
@@ -780,7 +841,10 @@
 				showOsd(player, { text: `${next}x`, value: next, max: 16 });
 			}, "scrollWheelSpeedControl", { passive: false });
 		},
-		disable: () => off("scrollWheelSpeedControl"),
+		disable: () => {
+			speedWheelModifier = null;
+			off("scrollWheelSpeedControl");
+		},
 	};
 
 	// 默认原声音轨
@@ -893,19 +957,52 @@
 				}
 			}
 
+			// timeupdate 每秒能来 4 次。原来每次都 readHistory()（JSON.parse 全量）
+			// 再 writeHistory()（sort 500 条 + stringify + setItem），全同步落盘
+			// 4Hz，长视频上掉帧、磁盘一直写。改成只更新内存 + 节流落盘，
+			// 离开页面前再强制写一次。
+			let pending = null;
+			let flushTimer = null;
+			const flush = () => {
+				flushTimer = null;
+				if (!pending) return;
+				writeHistory(pending);
+				pending = null;
+			};
+			// 最多每 10s 落一次盘
+			const scheduleFlush = () => {
+				if (flushTimer) return;
+				flushTimer = setTimeout(flush, 10000);
+			};
+			const persist = () => {
+				flush();
+				if (pagehideHandler) window.removeEventListener("pagehide", pagehideHandler);
+				if (visibilityHandler) document.removeEventListener("visibilitychange", visibilityHandler);
+			};
+			const pagehideHandler = () => flush();
+			const visibilityHandler = () => {
+				if (document.visibilityState === "hidden") flush();
+			};
+			window.addEventListener("pagehide", pagehideHandler);
+			document.addEventListener("visibilitychange", visibilityHandler);
+
 			on(video, "timeupdate", () => {
-				const snapshot = readHistory();
-				snapshot[videoId] = {
+				if (!pending) pending = readHistory();
+				pending[videoId] = {
 					time: video.currentTime,
 					duration: video.duration,
 					title: data?.title ?? document.title,
 					updatedAt: Date.now(),
 				};
-				writeHistory(snapshot);
+				scheduleFlush();
 			}, "videoHistory");
+			F.videoHistory.persist = persist;
 		},
 		disable: () => {
 			document.getElementById("yte-resume-prompt")?.remove();
+			// 收尾：把内存里还没落盘的进度写掉，别让用户白看几分钟。
+			F.videoHistory.persist?.();
+			F.videoHistory.persist = null;
 			off("videoHistory");
 		},
 	};

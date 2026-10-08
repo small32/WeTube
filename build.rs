@@ -94,6 +94,22 @@ const BUNDLED_TOOLS: [BundledTool; 3] = [
     },
 ];
 
+/// Git LFS 指针的判别：文件头是 `version https://git-lfs.github.com/spec/v1`。
+///
+/// 未装 git-lfs 的机器上 clone 下来，vendor/*.xz 就是这么一个纯文本占位
+/// （真实内容还在 LFS 服务端）。这时候"文件存在"不等于"内容可用"。
+fn is_lfs_pointer(bytes: &[u8]) -> bool {
+    const HEADER: &[u8] = b"version https://git-lfs.github.com/spec/v1";
+    bytes.len() < 1024 && bytes.starts_with(HEADER)
+}
+
+/// [`is_lfs_pointer`] 的路径版，读不出来就当不是指针（交给后面的流程报错）。
+fn is_lfs_pointer_path(path: &Path) -> bool {
+    fs::read(path)
+        .map(|bytes| is_lfs_pointer(&bytes))
+        .unwrap_or(false)
+}
+
 /// 把 vendor/ 下的外置工具内嵌进产物，供 Windows 单文件分发使用。
 ///
 /// 生成的 `bundled_tools.rs` 落进 OUT_DIR，由 download.rs include!。
@@ -122,7 +138,14 @@ fn embed_bundled_tools() {
         // ffmpeg 98MB→26MB，是包体最大的一块。没有 .xz 就内嵌原始字节，
         // 解出路径统一，只是多占体积。
         let packed_file = vendor.join(format!("{}.xz", tool.file));
-        let packed = packed_file.is_file();
+        // Git LFS 没展开时 vendor/*.xz 是一个 130 字节左右的**指针文本**，
+        // `is_file()` 照样是 true——照旧内嵌的话，产物能编译、能启动，
+        // 一按下载就解压失败。这里按 LFS 指针的头部特征把它认出来，
+        // 走"未内嵌"那条降级路径（运行时退回外部查找），别把指针当载荷。
+        let packed = packed_file.is_file()
+            && !fs::read(&packed_file)
+                .map(|bytes| is_lfs_pointer(&bytes))
+                .unwrap_or(false);
         let source = if packed { &packed_file } else { &file };
 
         println!("cargo:rerun-if-changed=vendor/{}", tool.file);
@@ -130,7 +153,7 @@ fn embed_bundled_tools() {
         println!("cargo:rerun-if-changed=vendor/{}.size", tool.file);
         println!("cargo:rerun-if-changed=vendor/{}", tool.version_file);
 
-        if source.is_file() {
+        if source.is_file() && !is_lfs_pointer_path(source) {
             let abs = Path::new(&manifest).join(source);
             let version = fs::read_to_string(vendor.join(tool.version_file))
                 .map(|value| value.trim().to_string())
@@ -200,24 +223,22 @@ fn bundle_enhancer() {
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR 未设置"));
     let src = Path::new("src/enhancer");
 
+    // 只打包 enhancer 自己的模块：titlebar.js / ui.js 由 main.rs 单独
+    // include_str! 注入。以前这两份两边都进了一遍，每个页面要解析两份
+    // （靠 __wetubeChromeMounted / __wetubeSupportMounted 守卫不会出错，
+    // 但体积和 document-start 的解析量都翻倍）。
     let bundle = [
-        "titlebar.js",
-        "ui.js",
         "runtime.js",
         "features.js",
         "volume-boost.js",
         "panel.js",
     ]
     .iter()
-.map(|name| {
-            let path = if *name == "titlebar.js" || *name == "ui.js" {
-                Path::new("src").join(name)
-            } else {
-                src.join(name)
-            };
-            fs::read_to_string(&path)
-                .unwrap_or_else(|err| panic!("读取 {} 失败: {err}", path.display()))
-        })
+    .map(|name| {
+        let path = src.join(name);
+        fs::read_to_string(&path)
+            .unwrap_or_else(|err| panic!("读取 {} 失败: {err}", path.display()))
+    })
     .collect::<Vec<_>>()
     .join("\n");
     fs::write(out_dir.join("enhancer-bundle.js"), bundle).expect("写入 enhancer-bundle.js 失败");

@@ -26,6 +26,17 @@ pub struct ConfigStore {
     /// 这边是扁平的一层。混在一起会让 `full_config()` 多出一堆无关字段。
     shortcuts: Map<String, Value>,
     path: PathBuf,
+    /// 主文件解析不出来且备份也不可用：为 true 时 `save()` 直接拒绝，避免清空用户数据。
+    corrupt: bool,
+    /// 本次是从 `settings.bak` 恢复出来的：保存时不能再拿损坏的主文件把 bak 顶掉。
+    recovered: bool,
+}
+
+/// 读备份文件，读不到或解析不了返回 `None`。
+fn read_backup(path: &std::path::Path) -> Option<Value> {
+    fs::read_to_string(path.with_extension("bak"))
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -34,25 +45,51 @@ pub enum ConfigError {
     Io(#[from] std::io::Error),
     #[error("schema 解析失败：{0}")]
     Schema(#[from] serde_json::Error),
+    /// 配置文件存在但解析不出来，且备份也救不回来。
+    ///
+    /// 这时继续写文件只会把用户的设置和快捷键清空、还会把完好的备份顶掉，
+    /// 所以一律拒绝落盘，让界面把错误显式报出来。
+    #[error("配置文件已损坏，拒绝覆盖（请手动修复或删除 settings.json 后重试）")]
+    Corrupt,
 }
 
 impl ConfigStore {
     pub fn load() -> Result<Self, ConfigError> {
         let schema: Value = serde_json::from_str(SCHEMA_JSON)?;
         let path = config_path();
-        let root: Value = fs::read_to_string(&path)
-            .ok()
-            .and_then(|text| serde_json::from_str(&text).ok())
-            .or_else(|| {
-                fs::read_to_string(path.with_extension("bak"))
-                    .ok()
-                    .and_then(|text| serde_json::from_str(&text).ok())
-            })
-            .unwrap_or_default();
+
+        // 「文件不存在」和「文件读不出来/解析不了」必须分开：
+        // 前者是首次启动，正常；后者说明用户数据可能已经坏了，
+        // 绝不能当成空配置再写回去（原写法会连带覆盖 settings.bak）。
+        let mut corrupt = false;
+        let mut recovered = false;
+        let root: Value = match fs::read_to_string(&path) {
+            Ok(text) => match serde_json::from_str::<Value>(&text) {
+                Ok(value) => value,
+                Err(_) => match read_backup(&path) {
+                    // 主文件坏了但备份还完好：用备份把数据救回来，允许继续保存。
+                    Some(value) => {
+                        recovered = true;
+                        value
+                    }
+                    None => {
+                        corrupt = true;
+                        Value::Null
+                    }
+                },
+            },
+            // 主文件不存在：首次启动，或上次写坏了没有留下主文件。
+            Err(_) => read_backup(&path).unwrap_or(Value::Null),
+        };
 
         let (overrides, shortcuts) = split_saved(root);
 
-        Ok(Self { schema, overrides, shortcuts, path })
+        Ok(Self { schema, overrides, shortcuts, path, corrupt, recovered })
+    }
+
+    /// 配置是否损坏到无法安全保存（见 [`ConfigError::Corrupt`]）。
+    pub fn is_corrupt(&self) -> bool {
+        self.corrupt
     }
 
     /// 默认值打底、用户值覆盖，得到完整配置。
@@ -114,6 +151,11 @@ impl ConfigStore {
     }
 
     fn save(&self) -> Result<(), ConfigError> {
+        // 数据已经救不回来就别写了：写下去只会把空配置盖到用户文件上，
+        // 还会把 settings.bak 里那份完好的备份一起顶掉。
+        if self.corrupt {
+            return Err(ConfigError::Corrupt);
+        }
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -132,9 +174,16 @@ impl ConfigStore {
             let backup = self.path.with_extension("bak");
             if self.path.exists() {
                 if backup.exists() {
-                    fs::remove_file(&backup)?;
+                    if self.recovered {
+                        // bak 是本次用来救数据的那份，不能再被覆盖：直接删掉坏掉的主文件。
+                        fs::remove_file(&self.path)?;
+                    } else {
+                        fs::remove_file(&backup)?;
+                        fs::rename(&self.path, &backup)?;
+                    }
+                } else {
+                    fs::rename(&self.path, &backup)?;
                 }
-                fs::rename(&self.path, &backup)?;
             }
             if let Err(err) = fs::rename(&tmp, &self.path) {
                 if backup.exists() {
@@ -212,13 +261,19 @@ fn merge_into(base: &mut Value, patch: &Value) {
 }
 
 /// 按点分路径写值，中间的层级自动补 Object。
+///
+/// 碰上非对象的中间层（老格式残留、手改过的配置文件）就把它顶掉重建，
+/// 不能 panic —— 这条路径直接吃用户输入，崩在主线程上就是"改设置就闪退"。
 pub fn set_path(value: &mut Value, path: &str, new_value: Value) {
     let parts: Vec<&str> = path.split('.').collect();
     let mut node = value;
     for part in &parts[..parts.len() - 1] {
+        if !node.is_object() {
+            *node = Value::Object(Map::new());
+        }
         let entry = node
             .as_object_mut()
-            .expect("set_path 只能作用于对象")
+            .expect("上一行已保证是对象")
             .entry((*part).to_string())
             .or_insert_with(|| Value::Object(Map::new()));
         if !entry.is_object() {
@@ -226,8 +281,11 @@ pub fn set_path(value: &mut Value, path: &str, new_value: Value) {
         }
         node = entry;
     }
+    if !node.is_object() {
+        *node = Value::Object(Map::new());
+    }
     node.as_object_mut()
-        .expect("set_path 只能作用于对象")
+        .expect("上一行已保证是对象")
         .insert(parts[parts.len() - 1].to_string(), new_value);
 }
 
@@ -349,5 +407,51 @@ mod tests {
         let mut node = serde_json::json!({ "a": 1 });
         set_path(&mut node, "a.b", Value::from("x"));
         assert_eq!(node["a"]["b"], "x");
+    }
+
+    /// 根节点本身就不是对象（脏配置）时不能 panic —— 原来会 expect 炸在主线程。
+    #[test]
+    fn set_path_tolerates_non_object_root() {
+        let mut node = Value::Bool(true);
+        set_path(&mut node, "a.b", Value::from("x"));
+        assert_eq!(node["a"]["b"], "x");
+
+        let mut node = Value::Null;
+        set_path(&mut node, "enabled", Value::Bool(true));
+        assert_eq!(node["enabled"], true);
+    }
+
+    /// 配置文件损坏时 save() 必须拒绝落盘，不能把用户文件和备份顶掉。
+    #[test]
+    fn save_refuses_when_corrupt() {
+        let dir = std::env::temp_dir().join(format!(
+            "wetube-config-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos())
+                .unwrap_or_default()
+        ));
+        fs::create_dir_all(&dir).expect("建临时目录");
+        let path = dir.join("settings.json");
+        fs::write(&path, "{ 这不是合法 JSON").expect("写损坏文件");
+
+        let store = ConfigStore {
+            schema: schema(),
+            overrides: Map::new(),
+            shortcuts: Map::new(),
+            path: path.clone(),
+            corrupt: true,
+            recovered: false,
+        };
+        assert!(matches!(store.save(), Err(ConfigError::Corrupt)));
+        assert_eq!(
+            fs::read_to_string(&path).expect("文件还在"),
+            "{ 这不是合法 JSON",
+            "损坏的配置不能被空配置覆盖"
+        );
+        assert!(!dir.join("settings.bak").exists(), "备份也不能被动过");
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

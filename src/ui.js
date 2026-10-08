@@ -6,7 +6,6 @@
  *   - 给 YouTube 页面追加顶部空白，让 masthead / ytd-app 不被 chrome 遮挡
  *   - 接管 webview 内能拦到的浏览器级快捷键（刷新 / 后退 / 前进 / 首页），
  *     转发给 IPC
- *   - 提供切换自定义 chrome 整体显隐的接口 `window.__wetubeToggleChrome`
  */
 (() => {
   if (window.__wetubeSupportMounted) return;
@@ -111,6 +110,9 @@
     );
     if (!button) {
       // 还没就绪就稍后再试，最多 ~10s，别无限重试。
+      // 计数器必须在每次**新的导航/尺寸变化**入口归零：以前只在找到按钮时
+      // 归零，登录页之类找不到按钮的页面跑满 40 次后，这个函数对整个页面
+      // 生命周期就变成永久空操作了。
       if (!syncWideGuide._wait) syncWideGuide._wait = 0;
       syncWideGuide._wait += 1;
       if (syncWideGuide._wait > 40) return;
@@ -131,23 +133,36 @@
     wasWide = true;
   }
 
-  /** 完整侧栏是否真的可见（宽 > 100px 且有一定高度）。 */
+  /** 完整侧栏是否真的可见（宽 > 100px 且有一定高度）。
+   *  只看真实布局：guide-persistent-and-visible 这个 attribute 有设置时序
+   *  延迟，收起时也未必立刻移除，照它判断会把"没展开"误判成"已展开"，
+   *  于是再也不自动展开。 */
   function isGuideOpen() {
-    const app = document.querySelector("ytd-app");
-    if (app?.hasAttribute("guide-persistent-and-visible")) return true;
     const guide = document.querySelector("ytd-guide-renderer");
     if (!guide) return false;
     const rect = guide.getBoundingClientRect();
     return rect.width > 100 && rect.height > 100;
   }
 
+  // resize 会连发几十上百次，每次都排一个 100ms 定时器（还从不清掉旧的），
+  // 每个回调里又是 querySelector + getBoundingClientRect。做个 debounce，
+  // 拖完窗口只跑一次。
+  let guideResizeTimer = 0;
+  function scheduleGuideSync() {
+    clearTimeout(guideResizeTimer);
+    guideResizeTimer = setTimeout(syncWideGuide, 100);
+  }
   window.addEventListener("resize", () => {
     const wide = window.innerWidth >= WIDE_GUIDE_BREAKPOINT;
     if (wide !== wasWide || (wide && !guideOpenRequested)) {
-      setTimeout(syncWideGuide, 100);
+      scheduleGuideSync();
     }
   });
-  window.addEventListener("yt-navigate-finish", () => setTimeout(syncWideGuide, 100));
+  // 每次导航都是新页面：重试计数要清零，否则上一页耗尽额度后这一页再也不展开。
+  window.addEventListener("yt-navigate-finish", () => {
+    syncWideGuide._wait = 0;
+    scheduleGuideSync();
+  });
 
   // 监听路由变化，让 SPA 跳转后能保持正确的下移状态。
   // 注意：不再包装 history.pushState/replaceState——包装会在 YouTube 的关键 SPA
@@ -262,14 +277,6 @@
     // 自定义滚动条（titlebar.js）跟 chrome 同进退：全屏藏、退出全屏恢复。
     window.__wetubeScrollbarSyncVisible?.(visible);
     applyShift(visible && isYouTube());
-  };
-
-  window.__wetubeToggleChrome = () => {
-    if (!HAS_CHROME) return false;
-    const bar = document.getElementById("wetube-chrome");
-    if (!bar) return false;
-    window.__wetubeSetChromeVisible(bar.style.display !== "none" ? false : true);
-    return bar.style.display !== "none";
   };
 
   // ---- 全屏联动（单向：播放器 → 窗口，仅 Windows 生效）----
