@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""从源 .ico 生成 Windows 图标和 macOS iconset。
+"""从源 PNG / ICO 生成 Windows 图标和 macOS iconset。
 
 用法：
-    python scripts/make-icons.py                     # 用 icons/source.ico
-    python scripts/make-icons.py 路径/到/图标.ico     # 指定源文件，顺便存进 icons/source.ico
+    python scripts/make-icons.py                     # 优先用 icons/source.png，否则 source.ico
+    python scripts/make-icons.py 路径/到/图标.png     # 保存源文件并生成各平台图标
 
 为什么不用现成工具：不希望这个仓库依赖 ImageMagick / PIL，所以自己实现了一遍
 ICO 解析、PNG 解码与编码、以及双三次插值放大。标准库就能跑。
 
 产出：
-    icons/app.ico                 Windows 用（原样保留，已含 9 个尺寸）
+    icons/app.ico                 Windows 用（PNG 源生成 9 个尺寸，ICO 源原样保留）
     icons/AppIcon.iconset/*.png   macOS 用（iconutil 的输入，10 个文件）
 """
 import pathlib
@@ -21,6 +21,7 @@ import zlib
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 ICON_DIR = ROOT / "icons"
 SOURCE = ICON_DIR / "source.ico"
+PNG_SOURCE = ICON_DIR / "source.png"
 
 # macOS iconset 里每个文件名对应的逻辑尺寸
 ICONSET = [
@@ -276,37 +277,57 @@ def main() -> int:
             print(f"找不到源文件：{src}", file=sys.stderr)
             return 1
         ICON_DIR.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src, SOURCE)
-        print(f"已保存源图标 → {SOURCE.relative_to(ROOT)}")
+        destination = PNG_SOURCE if src.suffix.lower() == ".png" else SOURCE
+        if src.resolve() != destination.resolve():
+            shutil.copy2(src, destination)
+        print(f"已保存源图标 → {destination.relative_to(ROOT)}")
+    elif PNG_SOURCE.exists():
+        src = PNG_SOURCE
     elif SOURCE.exists():
         src = SOURCE
     else:
-        print("没有源图标。用法：python scripts/make-icons.py <图标.ico>", file=sys.stderr)
+        print("没有源图标。用法：python scripts/make-icons.py <图标.png 或 .ico>", file=sys.stderr)
         return 1
 
-    images = load_entries(src)
+    is_png = src.suffix.lower() == ".png"
+    images = [png_decode(src.read_bytes())] if is_png else load_entries(src)
     print("源图标含尺寸：" + "、".join(f"{w}x{h}" for w, h, _ in images))
 
-    # Windows：原样用，里面的 9 个尺寸比我们生成的更全
+    base_w, base_h, base = images[-1]
+    if base_w != base_h:
+        print("源图标必须为正方形", file=sys.stderr)
+        return 1
+    cache = {w: pixels for w, _, pixels in images}
+
+    def pixels_for(size):
+        if size not in cache:
+            cache[size] = resize(base, base_w, base_h, size, size)
+        return cache[size]
+
+    # Windows：PNG 源生成多尺寸 ICO；旧 ICO 源保留现有的尺寸及编码。
     app_ico = ICON_DIR / "app.ico"
-    shutil.copy2(src, app_ico)
+    if is_png:
+        sizes = [16, 24, 32, 48, 64, 96, 128, 192, 256]
+        payloads = [png_encode(size, size, pixels_for(size)) for size in sizes]
+        offset = 6 + 16 * len(sizes)
+        directory = bytearray(struct.pack("<HHH", 0, 1, len(sizes)))
+        for size, payload in zip(sizes, payloads):
+            directory += struct.pack("<BBBBHHII", size % 256, size % 256, 0, 0, 1, 32, len(payload), offset)
+            offset += len(payload)
+        ico = bytes(directory) + b"".join(payloads)
+        app_ico.write_bytes(ico)
+        SOURCE.write_bytes(ico)
+    elif src.resolve() != app_ico.resolve():
+        shutil.copy2(src, app_ico)
     print(f"Windows 图标 → {app_ico.relative_to(ROOT)}")
 
     # macOS：挑一张最清晰的做基准，缺的大尺寸靠放大补
-    base_w, base_h, base = images[-1]
     print(f"以 {base_w}x{base_h} 为基准生成 iconset")
 
     iconset = ICON_DIR / "AppIcon.iconset"
     iconset.mkdir(parents=True, exist_ok=True)
     for name, size in ICONSET:
-        if size == base_w:
-            pixels = base
-        elif size < base_w:
-            # 缩小时优先用源里现成的同尺寸图，避免重采样损失
-            exact = next((img for img in images if img[0] == size), None)
-            pixels = exact[2] if exact else resize(base, base_w, base_h, size, size)
-        else:
-            pixels = resize(base, base_w, base_h, size, size)
+        pixels = pixels_for(size)
         (iconset / name).write_bytes(png_encode(size, size, pixels))
 
     print(f"macOS iconset → {iconset.relative_to(ROOT)}/（{len(ICONSET)} 个文件）")
