@@ -26,8 +26,6 @@ YTDLP_MACOS_SHA256="0f192b7ec147ab6288885d6351d9ab67367640029b4377576ef46dd79cf7
 #   ffmpeg  —— osxexperts.net 静态构建（GPLv3，含 x264/x265 编码器）
 #
 # ffmpeg 下载地址无版本号，上游更新后需同步更新 URL 与 SHA256。
-FFMPEG_ARM_URL=<新地址> ./scripts/build-macos-app.sh
-#
 FFMPEG_ARM_URL="${FFMPEG_ARM_URL:-https://www.osxexperts.net/ffmpeg9arm.zip}"
 FFMPEG_ARM_SHA256="${FFMPEG_ARM_SHA256:-d0c06c5c68ce48af3143b262f7a9118a7c9f67de1e237fcc24ffb14df9c67af9}"
 # qjs —— QuickJS-NG 的 JS runtime（EJS）：YouTube 播放器挑战需要跑 JS，
