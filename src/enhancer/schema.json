@@ -471,27 +471,9 @@
       ]
     },
     {
-      "id": "automaticallyDisableClosedCaptions",
-      "label": "自动关闭字幕",
-      "desc": "打开视频自动关掉字幕",
-      "group": "player",
-      "pages": [
-        "watch",
-        "live"
-      ],
-      "fields": [
-        {
-          "key": "enabled",
-          "type": "boolean",
-          "default": false,
-          "label": "启用"
-        }
-      ]
-    },
-    {
       "id": "automaticallyEnableClosedCaptions",
       "label": "自动开启字幕",
-      "desc": "打开视频自动打开字幕",
+      "desc": "勾选时自动开启字幕；未勾选时新视频默认关闭，仍可手动开启",
       "group": "player",
       "pages": [
         "watch",

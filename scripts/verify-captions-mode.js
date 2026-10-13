@@ -33,7 +33,8 @@ async function main() {
       return name === 'aria-pressed' ? String(captionsOn) : null;
     },
     click() {
-      setTimeout(() => { captionsOn = true; }, APPLY_DELAY);
+      const next = !captionsOn;
+      setTimeout(() => { captionsOn = next; }, APPLY_DELAY);
     },
   };
 
@@ -77,6 +78,8 @@ async function main() {
   };
 
   const ctx = {
+    location: runtime.location,
+    URL,
     F: YTE.features,
     document,
     performance,
@@ -109,7 +112,20 @@ async function main() {
   );
   assert.equal(captionsOn, true, `重同步后字幕应当仍开着，但实际 captionsOn=${captionsOn}`);
 
-  console.log('通过：自动开启字幕在 SPA 重同步时不会被关掉，unloadModule 调用次数 =', unloadCalls.length);
+  YTE.config.automaticallyEnableClosedCaptions.enabled = false;
+  await YTE.syncAll({ force: true });
+  await sleep(150);
+  assert.equal(captionsOn, false, '取消勾选应关闭字幕');
+  button.click();
+  await sleep(150);
+  await YTE.syncAll({ force: true });
+  await sleep(150);
+  assert.equal(captionsOn, true, '手动开启后重同步应保留字幕');
+  runtime.location.href = 'https://www.youtube.com/watch?v=next';
+  await YTE.syncAll({ force: true });
+  await sleep(150);
+  assert.equal(captionsOn, false, '未勾选时下一视频应默认关闭');
+  console.log('通过：字幕单一选项、默认关闭、手动开启及切视频行为');
 }
 
 main().catch((err) => {

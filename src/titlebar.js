@@ -141,7 +141,7 @@
     },
     {
       label: "帮助",
-      items: [{ id: "project", label: "项目主页" }],
+      items: [{ id: "about", label: "关于" }],
     },
   ];
 

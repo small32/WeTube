@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
 # 在 macOS 上构建并打包成 WeTube.app。
 #
-#   ./scripts/build-macos-app.sh            # 打本机架构
+#   ./scripts/build-macos-app.sh            # 打 Apple Silicon / arm64
 #   ./scripts/build-macos-app.sh aarch64-apple-darwin
-#   ./scripts/build-macos-app.sh x86_64-apple-darwin
-# Intel 构建需在构建机上安装 x86_64 版 ffmpeg 与 qjs（或 Universal 版）。
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 APP_NAME="WeTube"
-TARGET="${1:-}"
+TARGET="${1:-aarch64-apple-darwin}"
+if [ "$TARGET" != "aarch64-apple-darwin" ]; then
+  echo "错误：macOS 仅支持 Apple Silicon（aarch64-apple-darwin）" >&2
+  exit 1
+fi
 ICONSET="icons/AppIcon.iconset"
 
 # 打包进 Resources 的 yt-dlp / ffmpeg 版本（pin 死，保证构建可复现）。
@@ -23,26 +25,11 @@ YTDLP_URL="https://github.com/yt-dlp/yt-dlp/releases/download/${YTDLP_VERSION}/y
 YTDLP_MACOS_SHA256="0f192b7ec147ab6288885d6351d9ab67367640029b4377576ef46dd79cf7b202"
 #   ffmpeg  —— osxexperts.net 静态构建（GPLv3，含 x264/x265 编码器）
 #
-# ⚠️ ffmpeg 这两条地址是 osxexperts 的**无版本号直链**：上游发新版是原地替换同名
-#    文件，所以这里 pin 死的 SHA256 迟早会对不上，`fetch_tool` 会直接中止构建
-#    （这是刻意的 fail-closed）。届时先按 URL 打开看看是不是换版本了，再更新：
-#      1. 改本文件头部这两对 URL/SHA256；
-#      2. `release.yml` 的「准备 Intel(x86_64) 外置工具」步骤不再自己硬编码，
-#         它 `source` 本文件头部的 FFMPEG_INTEL_* —— 所以只要改这一处。
-#    临时绕过（别长期用）：同名环境变量覆盖，例如
-#      FFMPEG_ARM_SHA256=<新哈希> FFMPEG_ARM_URL=<新地址> ./scripts/build-macos-app.sh
+# ffmpeg 下载地址无版本号，上游更新后需同步更新 URL 与 SHA256。
+FFMPEG_ARM_URL=<新地址> ./scripts/build-macos-app.sh
 #
-# ⚠️ 版本偏斜：Intel 仍停在 ffmpeg 8。osxexperts 只出 ffmpeg9arm.zip，
-#    没有对应版本的 Intel 包（ffmpeg9intel.zip 实测 404），所以两个架构的
-#    ffmpeg 主版本不同。yt-dlp 用到的合并/remux/提音频参数在 8/9 上行为一致，
-#    但评估画质/编码行为的问题时要记得这一层差异。上游哪天补了 Intel 版，
-#    把 FFMPEG_INTEL_* 换过去即可（记得同时换 zip 与解出二进制的哈希）。
 FFMPEG_ARM_URL="${FFMPEG_ARM_URL:-https://www.osxexperts.net/ffmpeg9arm.zip}"
 FFMPEG_ARM_SHA256="${FFMPEG_ARM_SHA256:-d0c06c5c68ce48af3143b262f7a9118a7c9f67de1e237fcc24ffb14df9c67af9}"
-# Intel 版只被 release.yml 使用（脚本的 Intel 分支要求构建机 PATH 里有
-# x86_64 ffmpeg）。哈希是**下载的那个 zip** 的，不是解出来的 ffmpeg 的。
-FFMPEG_INTEL_URL="${FFMPEG_INTEL_URL:-https://www.osxexperts.net/ffmpeg80intel.zip}"
-FFMPEG_INTEL_SHA256="${FFMPEG_INTEL_SHA256:-2d24d22db78c87f394a5822867acd5c5dc5e762cd261a44bd26923f3a5af3e07}"
 # qjs —— QuickJS-NG 的 JS runtime（EJS）：YouTube 播放器挑战需要跑 JS，
 # 没有它 yt-dlp 会报 "No supported JavaScript runtime" 警告。
 # 用 ~1MB 的 QuickJS 替代 ~81MB 的 deno（yt-dlp 官方支持，要求 QuickJS-NG
@@ -106,13 +93,8 @@ PY
 
 check_ytdlp_latest
 
-if [ -n "$TARGET" ]; then
-  cargo build --release --locked --target "$TARGET"
-  BIN_DIR="target/$TARGET/release"
-else
-  cargo build --release --locked
-  BIN_DIR="target/release"
-fi
+cargo build --release --locked --target "$TARGET"
+BIN_DIR="target/$TARGET/release"
 
 APP_DIR="$BIN_DIR/$APP_NAME.app"
 CONTENTS="$APP_DIR/Contents"
@@ -222,41 +204,24 @@ else
   cp "$VENDOR_DIR/yt-dlp_macos" "$BIN_DIR_RES/yt-dlp"
   chmod +x "$BIN_DIR_RES/yt-dlp"
 
-  BUILD_ARCH="${TARGET:-$(uname -m)}"
-  LIB_ARGS=()
-  if [ "$BUILD_ARCH" = "x86_64-apple-darwin" ] || [ "$BUILD_ARCH" = "x86_64" ]; then
-    TOOL_ARCH="x86_64"
-    # ARM 下载地址不能打进 Intel 包；从构建机取兼容的工具，并检查实际架构。
-    for tool in ffmpeg qjs; do
-      tool_path="$(command -v "$tool" || true)"
-      if [ -z "$tool_path" ] || ! lipo -archs "$tool_path" 2>/dev/null | grep -qw x86_64; then
-        echo "错误：构建 Intel 包需要可执行的 x86_64 $tool（当前：${tool_path:-未安装}）" >&2
-        exit 1
-      fi
-      cp "$tool_path" "$BIN_DIR_RES/$tool"
-      chmod +x "$BIN_DIR_RES/$tool"
-      LIB_ARGS+=("--${tool}-source" "$tool_path")
-    done
-  else
-    TOOL_ARCH="arm64"
-    # ffmpeg/ffprobe：osxexperts 的 zip 里就是 ARM 裸二进制。
-    if [ ! -f "$VENDOR_DIR/ffmpeg" ] || ! verify_sha "$VENDOR_DIR/ffmpeg" "$FFMPEG_ARM_SHA256"; then
-      fetch_tool "$FFMPEG_ARM_URL" "$FFMPEG_ARM_SHA256" "$VENDOR_DIR/ffmpeg9arm.zip"
-      unzip -o -j -q "$VENDOR_DIR/ffmpeg9arm.zip" ffmpeg -d "$BIN_DIR_RES"
-      mv "$BIN_DIR_RES/ffmpeg" "$VENDOR_DIR/ffmpeg"
-      rm -f "$VENDOR_DIR/ffmpeg9arm.zip"
-    fi
-    cp "$VENDOR_DIR/ffmpeg" "$BIN_DIR_RES/ffmpeg"
-    chmod +x "$BIN_DIR_RES/ffmpeg"
-
-    # qjs：yt-dlp 的 JS runtime（消 EJS 警告）。
-    fetch_tool "$QJS_URL" "$QJS_SHA256" "$VENDOR_DIR/qjs"
-    cp "$VENDOR_DIR/qjs" "$BIN_DIR_RES/qjs"
-    chmod +x "$BIN_DIR_RES/qjs"
+  TOOL_ARCH="arm64"
+  # ffmpeg/ffprobe：osxexperts 的 zip 里就是 ARM 裸二进制。
+  if [ ! -f "$VENDOR_DIR/ffmpeg" ] || ! verify_sha "$VENDOR_DIR/ffmpeg" "$FFMPEG_ARM_SHA256"; then
+    fetch_tool "$FFMPEG_ARM_URL" "$FFMPEG_ARM_SHA256" "$VENDOR_DIR/ffmpeg9arm.zip"
+    unzip -o -j -q "$VENDOR_DIR/ffmpeg9arm.zip" ffmpeg -d "$BIN_DIR_RES"
+    mv "$BIN_DIR_RES/ffmpeg" "$VENDOR_DIR/ffmpeg"
+    rm -f "$VENDOR_DIR/ffmpeg9arm.zip"
   fi
+  cp "$VENDOR_DIR/ffmpeg" "$BIN_DIR_RES/ffmpeg"
+  chmod +x "$BIN_DIR_RES/ffmpeg"
+
+  # qjs：yt-dlp 的 JS runtime（消 EJS 警告）。
+  fetch_tool "$QJS_URL" "$QJS_SHA256" "$VENDOR_DIR/qjs"
+  cp "$VENDOR_DIR/qjs" "$BIN_DIR_RES/qjs"
+  chmod +x "$BIN_DIR_RES/qjs"
 
   # 收齐 Homebrew 等动态构建的传递依赖，并改成包内相对引用。
-  python3 scripts/bundle-macos-libs.py "$BIN_DIR_RES" "$TOOL_ARCH" ${LIB_ARGS[@]+"${LIB_ARGS[@]}"}
+  python3 scripts/bundle-macos-libs.py "$BIN_DIR_RES" "$TOOL_ARCH"
 
   # 二进制带了 quarantine 会被 Gatekeeper 拦，删掉确保双击 App 后能直接跑。
   xattr -cr "$BIN_DIR_RES" 2>/dev/null || true

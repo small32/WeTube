@@ -544,28 +544,24 @@
 
 	const subtitlesButton = () => document.querySelector("button.ytp-subtitles-button");
 
-	/** 用 retry 把 CC 按钮切换到目标状态（aria-pressed === want）。 */
-	const setClosedCaptions = (want) =>
-		void retry(() => {
-			const button = subtitlesButton();
-			if (!button) return false;
-			if (button.getAttribute("aria-pressed") === String(want)) return true;
-			button.click();
-			return true;
-		}, { attempts: 12, interval: 250, timeout: 6000 });
-
-	F.automaticallyDisableClosedCaptions = {
-		enable: () => setClosedCaptions(false),
-		disable: () => {},
-	};
-
+	let captionsDefaultKey;
 	F.automaticallyEnableClosedCaptions = {
-		enable: () => setClosedCaptions(true),
-		// 与 automaticTheaterMode 同理：runtime 的 force 重同步会对「仍启用」的功能先
-		// disable 再 enable，而 unloadModule 会真的把字幕模块卸掉（= 关掉字幕），
-		// enable 又是不返回 Promise 的 retry，两者并发时净效果是字幕被关。
-		// 这个功能的语义只是「自动开启」，关掉开关不该去动当前的字幕状态。
-		// 回归测试：scripts/verify-captions-mode.js
+		enable: (config) => {
+			const want = config.enabled === true;
+			const video = new URL(location.href).searchParams.get("v") || location.pathname;
+			const key = `${video}:${want}`;
+			if (captionsDefaultKey === key) return;
+			captionsDefaultKey = key;
+			void retry(() => {
+				if (captionsDefaultKey !== key) return true;
+				const data = getPlayer()?.getVideoData?.();
+				if (data?.video_id && data.video_id !== video) return false;
+				const button = subtitlesButton();
+				if (!button) return false;
+				if (button.getAttribute("aria-pressed") !== String(want)) button.click();
+				return true;
+			}, { attempts: 12, interval: 250, timeout: 6000 });
+		},
 		disable: () => {},
 	};
 

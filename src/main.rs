@@ -12,6 +12,9 @@
 // 需要看调试日志时，把 eprintln 输出重定向到文件即可。
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
+#[cfg(all(target_os = "macos", not(target_arch = "aarch64")))]
+compile_error!("WeTube macOS 仅支持 Apple Silicon (arm64)");
+
 use std::collections::HashMap;
 use std::error::Error;
 use std::path::{Path, PathBuf};
@@ -40,6 +43,7 @@ mod cookies;
 mod download;
 mod shortcuts;
 mod translate;
+mod update;
 #[cfg(target_os = "macos")]
 mod native_audio;
 use config::ConfigStore;
@@ -139,7 +143,7 @@ mod ipc_origin_tests {
     }
 }
 #[allow(dead_code)] // 仅 macOS 菜单里 "项目主页" 用到
-const PROJECT_URL: &str = "http://small32.top:8418/winc0/WeTube";
+const PROJECT_URL: &str = "https://github.com/small32/WeTube";
 
 /// 注入到页面里，让前端知道该用哪种拖拽方式。
 #[cfg(target_os = "windows")]
@@ -176,6 +180,7 @@ const DEEPDARK_PRESETS_JS: &str = include_str!("enhancer/deepdark-presets.js");
 /// 事件循环里流动的消息：工具栏指令、菜单点击、或设置面板的配置变更。
 #[derive(Debug, Clone)]
 enum Command {
+    UpdateResult(Value),
     #[cfg(target_os = "macos")]
     NativeAudioEvent(Value),
     Ipc(String, bool),
@@ -470,6 +475,14 @@ fn main() -> Result<(), Box<dyn Error>> {
                 download::kill_all();
             }
             Event::UserEvent(Command::Ipc(msg, trusted)) => {
+                if msg == "check-update" && trusted {
+                    let proxy = translate_proxy.clone();
+                    std::thread::spawn(move || {
+                        let result = update::check();
+                        let _ = proxy.send_event(Command::UpdateResult(result));
+                    });
+                    return;
+                }
                 debug_log(&format!("指令来源: 页面 IPC → {msg:?}"));
                 if let Some(url) = msg.strip_prefix("open:") {
                     // 与其他三个出口（导航、新窗口、external）保持同一套白名单：
@@ -515,6 +528,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                     ),
                     _ => act(&webview, &window, &msg),
                 }
+            }
+            Event::UserEvent(Command::UpdateResult(payload)) => {
+                eval(&webview, &format!("window.__wetubeUpdateResult?.({payload})"));
             }
             #[cfg(target_os = "macos")]
             Event::UserEvent(Command::NativeAudioEvent(payload)) => {
@@ -572,14 +588,6 @@ Event::UserEvent(Command::Menu(id)) => {
                 debug_log(&format!("指令来源: 菜单栏 → {id:?}"));
                 if id == "quit" {
                     *control_flow = ControlFlow::Exit;
-                } else if id == "project" {
-                    if let Err(err) = open::that(PROJECT_URL) {
-                        log_err(&format!("打开项目主页失败: {err}"));
-                    }
-                } else if id == "shortcuts" {
-                    eval(&webview, "window.__wetubeToggleShortcutPanel?.()");
-                } else if id == "settings" {
-                    eval(&webview, "window.__YTE?.togglePanel?.()");
                 } else {
                     act(&webview, &window, &id);
                 }
@@ -1141,6 +1149,16 @@ fn act(webview: &WebView, window: &Window, action: &str) {
         ));
     }
     match action {
+        "about" | "check-update" => {
+            eval(webview, include_str!("about.js"));
+            eval(webview, &format!("window.__wetubeShowAbout({});", serde_json::json!({
+                "version": env!("CARGO_PKG_VERSION"), "developer": "Small32", "project": PROJECT_URL,
+                "icon": include_bytes!("../icons/AppIcon.iconset/icon_128x128.png").as_slice()
+            })));
+            if action == "check-update" {
+                eval(webview, "window.__wetubeCheckUpdate()");
+            }
+        }
         "back" => eval(webview, "history.back()"),
         "forward" => eval(webview, "history.forward()"),
         "reload" => eval(webview, "location.reload()"),
@@ -1312,8 +1330,6 @@ use muda::{
 // 整个被 cfg 掉了。属性不能挂在嵌套的 use 项上，所以单独拆一条出来。
 #[cfg_attr(target_os = "macos", allow(unused_imports))]
 use muda::accelerator::{Code, Modifiers};
-#[cfg(target_os = "macos")]
-use muda::AboutMetadata;
 
 /// 取某项快捷键当前生效的 `Accelerator`。
 ///
@@ -1395,16 +1411,7 @@ fn build_menu(store: &ConfigStore) -> Result<(Menu, MenuItemMap), Box<dyn Error>
             APP_NAME,
             true,
             &[
-                &PredefinedMenuItem::about(
-                    None,
-                    Some(AboutMetadata {
-                        name: Some(APP_NAME.to_string()),
-                        version: Some(env!("CARGO_PKG_VERSION").to_string()),
-                        comments: Some("一个同时支持 macOS 与 Windows 的 YouTube 桌面端App，内建 YouTube-Enhancer".to_string()),
-                        website: Some(PROJECT_URL.to_string()),
-                        ..Default::default()
-                    }),
-                ),
+                &MenuItem::with_id("about", "关于 WeTube", true, None),
                 &PredefinedMenuItem::separator(),
                 &PredefinedMenuItem::services(None),
                 &PredefinedMenuItem::separator(),
@@ -1443,8 +1450,7 @@ fn build_menu(store: &ConfigStore) -> Result<(Menu, MenuItemMap), Box<dyn Error>
     };
 
     #[cfg(not(target_os = "macos"))]
-    let (file, help) = {
-        let file = Submenu::with_items(
+    let file = Submenu::with_items(
             "文件",
             true,
             &[&MenuItem::with_id(
@@ -1454,16 +1460,12 @@ fn build_menu(store: &ConfigStore) -> Result<(Menu, MenuItemMap), Box<dyn Error>
                 Some(Accelerator::new(Some(Modifiers::ALT), Code::F4)),
             )],
         )?;
-        let help = Submenu::with_items(
-            "帮助",
-            true,
-            &[&MenuItem::with_id("project", "项目主页", true, None)],
-        )?;
-        (file, help)
-    };
+    let help = Submenu::with_items("帮助", true, &[
+        &MenuItem::with_id("about", "关于", true, None),
+    ])?;
 
     #[cfg(target_os = "macos")]
-    let top: Vec<&dyn muda::IsMenuItem> = vec![&app, &edit, &nav, &view, &window_menu];
+    let top: Vec<&dyn muda::IsMenuItem> = vec![&app, &edit, &nav, &view, &window_menu, &help];
     #[cfg(not(target_os = "macos"))]
     let top: Vec<&dyn muda::IsMenuItem> = vec![&file, &nav, &view, &help];
 

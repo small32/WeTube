@@ -1,10 +1,10 @@
 [package]
 name = "WeTube"
-version = "3.0.8"
+version = "3.0.9"
 edition = "2024"
 description = "WeTube：一个同时支持 macOS 与 Windows 的 YouTube 桌面端App（内建 YouTube-Enhancer）"
 license = "GPL-3.0"
-repository = "http://small32.top:8418/winc0/WeTube"
+repository = "https://github.com/small32/WeTube"
 readme = "README.md"
 
 # 导出内置浏览器（WebView2）的 cookie 给 yt-dlp 用。只有 Windows 需要：

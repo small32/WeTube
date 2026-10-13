@@ -299,7 +299,8 @@
 		if (!impl) return;
 
 		const feature = YTE.schema.features.find((item) => item.id === id);
-		const enabled = isEnabled(id) && pageAllowed(feature?.pages);
+		// 字幕选项在未勾选时也要执行：为新视频设置默认关闭状态。
+		const enabled = (id === "automaticallyEnableClosedCaptions" || isEnabled(id)) && pageAllowed(feature?.pages);
 		const previous = active.get(id);
 		const config = cfg(id);
 
