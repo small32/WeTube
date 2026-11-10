@@ -6,7 +6,7 @@
 
 WeTube 是使用 Rust 编写的 YouTube 桌面应用，内建 [YouTube-Enhancer](https://github.com/YouTube-Enhancer/extension) 功能，无需另装浏览器扩展。
 
-项目地址：[small32/WeTube](https://github.com/small32/WeTube) · 开发人：Small32 · 版本：3.0.9
+项目地址：[small32/WeTube](https://github.com/small32/WeTube) · 开发人：Small32 · 版本：3.1.0
 
 ### 下载与更新
 
@@ -70,7 +70,7 @@ macOS 音频验证可运行 `bash scripts/verify-native-audio.sh`（需要 ffmpe
 
 WeTube is a Rust-based YouTube desktop app with built-in [YouTube-Enhancer](https://github.com/YouTube-Enhancer/extension) features. No browser extension installation is required.
 
-Repository: [small32/WeTube](https://github.com/small32/WeTube) · Developer: Small32 · Version: 3.0.9
+Repository: [small32/WeTube](https://github.com/small32/WeTube) · Developer: Small32 · Version: 3.1.0
 
 ### Downloads and updates
 

@@ -51,6 +51,21 @@ use config::ConfigStore;
 const APP_NAME: &str = "WeTube";
 const HOME_URL: &str = "https://www.youtube.com";
 
+/// macOS WKWebView 的默认 UA 实测为：
+/// `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko)`
+/// —— 结尾**没有** `Version/x Safari/605.1.15`。少了这段，UA 里就解析不出任何
+/// 浏览器版本，YouTube 直播聊天（live_chat iframe）会据此判定「浏览器版本较旧」
+/// 并拒绝加载聊天，而主站视频播放不受影响，所以症状只出现在右侧聊天栏。
+///
+/// 补成 Safari 风格 UA 即可。**不要伪装成 Chrome**：Google 登录会用
+/// `navigator.userAgentData` / Sec-CH-UA / TLS 指纹交叉校验，WebKit 内核挂 Chrome
+/// UA 会被判为伪造、弹无法通过的验证码。
+///
+/// 版本号只要高于 YouTube 的最低 Safari 要求即可，刻意不追最新系统版本：
+/// 声称过高的版本反而可能让站点启用当前 WebKit 尚不支持的特性。
+#[cfg(target_os = "macos")]
+const USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.6 Safari/605.1.15";
+
 /// 仅可信的 YouTube 主页面能调用具有本地副作用的 IPC。
 fn is_trusted_ipc_uri(uri: &Uri) -> bool {
     uri.scheme_str() == Some("https")
@@ -372,7 +387,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // 翻译请求在后台线程里跑，结果要靠这个 proxy 送回主线程再 eval。
     // ipc_proxy 稍后会被 move 进 IPC 回调，所以这里先克隆一份。
     let translate_proxy = ipc_proxy.clone();
-    let webview = WebViewBuilder::new()
+    let webview_builder = WebViewBuilder::new()
         .with_url(HOME_URL)
         // 只注入主框架：这一坨有几百 KB，塞进每个 iframe 纯属浪费
         .with_initialization_script_for_main_only(init_script, true)
@@ -405,8 +420,15 @@ fn main() -> Result<(), Box<dyn Error>> {
                 log_err(&format!("拒绝把非 http(s) 链接交给系统处理: {url}"));
             }
             NewWindowResponse::Deny
-        })
-        .build(&window)?;
+        });
+
+    // 必须在首次导航前设置：WKWebView 会缓存首次加载时的 UA，之后再改不生效。
+    // wry 的 with_user_agent 走 WKWebView.customUserAgent，对主框架和
+    // live_chat 等 iframe 一并生效。Windows 的 WebView2 默认就是 Chromium UA，无需改。
+    #[cfg(target_os = "macos")]
+    let webview_builder = webview_builder.with_user_agent(USER_AGENT);
+
+    let webview = webview_builder.build(&window)?;
 
     // 启动先导一份（可能是上次登录留下的会话），之后每次点下载前再刷一次。
     if let Err(err) = cookies::export(&webview) {
